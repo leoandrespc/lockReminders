@@ -14,11 +14,15 @@ The alert is a row of icons for what is missing or about to expire. A short coun
 
 Warlocks and hunters can add a **Pet** reminder. It shows when the pet is not out. A sacrificed warlock pet does not count as missing.
 
+![Buff list with Pet and Demon Skin, each set to Always and Combat](Screenshots/buffs.jpg)
+
 ## Items
 
 Food buffs and food items live here, along with the warlock **Healthstone**.
 
 A food buff reminds you in a raid when that buff is down. A food item can also be marked to alert in combat. The healthstone icon shows when you have none in your bags. Both follow the same Raid, Party, and Always checks as buffs.
+
+![Healthstone on the Items tab, currently off](Screenshots/items.jpg)
 
 ## Procs
 
@@ -28,11 +32,15 @@ Pick a talent whose proc you want announced. Nightfall, for example, watches for
 
 Add your spells and your pet's spells. The alert fires only when one of those spells fully misses or is fully resisted.
 
+![Spells chosen for a full miss or a full resist](Screenshots/spell-misses.jpg)
+
 A partial resist still landed, so it stays quiet. Dodge, parry, absorb, and block stay quiet too. A Fear that lands does not alert. A Shadow Bolt that hits for a reduced amount does not alert.
 
 Interrupts such as Spell Lock are not judged by damage. The alert fires when the interrupt misses: the target keeps casting, and the silence never lands.
 
 **Immune** is its own gold alert. It covers every spell you and your pet cast, not only the ones on the miss list. It has its own on/off switch and a Test button next to Move.
+
+![Immune alert for Fear](Screenshots/immune.jpg)
 
 ## Status
 
@@ -48,13 +56,19 @@ This tab is for you, on any class.
 
 This tab is only on a warlock. It holds four alerts, and each one has Raid, Party, and Always, a size, Move, and Test.
 
+![Warlock options for the soulstone, the tracker, Banish, and soul shards](Screenshots/warlock.jpg)
+
 **Missing stone** glows when you are not carrying a soulstone. It uses the soulstone sound.
 
 **On screen** lists people who currently have your soulstone, with a live timer. **Full name** keeps the full character name. **Frame** draws or hides the purple border around that list.
 
+![Soulstone tracker with live timers, the caster in parentheses, and stones not yet used](Screenshots/soulstone-tracker.jpg)
+
 **Banish** shows the spell icon and a countdown during the last seconds you set. The text under the icon defaults to `BANISH`, and the mob name sits under that.
 
 **Soul shards** shows the shard icon with the count inside it. At zero the number turns red and the text under the icon appears. That text defaults to `NO SHARDS`. Clear the box and the alert is only the icon and the number. The sound plays when the count crosses from one or more down to zero.
+
+![Shard icon with the bag count drawn on it](Screenshots/soul-shards.jpg)
 
 ## Sounds
 
