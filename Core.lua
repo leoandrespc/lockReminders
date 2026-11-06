@@ -2634,8 +2634,8 @@ local function CollectSaved(query)
 	SortByName(powers)
 	SortByName(foods)
 	return Sections(
-		{ title = "Powers", rows = powers },
-		{ title = "Consumables", rows = foods }
+		{ title = "Buffs", rows = powers },
+		{ title = "Items", rows = foods }
 	)
 end
 
@@ -3856,13 +3856,13 @@ local function SetTab(id)
 		if configuring then
 			local module = panel.alertModule or "powers"
 			if module == "talents" then
-				panel.alertTitle:SetText("Talent alert")
+				panel.alertTitle:SetText("Proc alert")
 			elseif module == "food" then
-				panel.alertTitle:SetText("Consumable alert")
+				panel.alertTitle:SetText("Item alert")
 			elseif module == "spells" then
-				panel.alertTitle:SetText("Spell alert")
+				panel.alertTitle:SetText("Spell misses/resist")
 			else
-				panel.alertTitle:SetText("Power alert")
+				panel.alertTitle:SetText("Buff alert")
 			end
 		end
 	end
@@ -5854,7 +5854,7 @@ end
 
 function LockRemindersOpenSettings(owner, key)
 	local bar = CreateFrame("Frame", nil, owner)
-	bar:SetPoint("TOPLEFT", 14, -180)
+	bar:SetPoint("TOPLEFT", 14, -116)
 	bar:SetPoint("BOTTOMRIGHT", -16, 36)
 	bar:Hide()
 	owner[key] = bar
@@ -6000,7 +6000,7 @@ function LockRemindersSettingsButton(parent, anchor, text, gap, onClick)
 	return button
 end
 
-function LockRemindersSettingsEdit(parent, anchor, field, fallback, width, onApply)
+function LockRemindersSettingsEdit(parent, anchor, field, fallback, width, onApply, allowEmpty)
 	local box = CreateFrame("EditBox", nil, parent, "BackdropTemplate")
 	box:SetSize(width or 140, 22)
 	box:SetPoint("LEFT", anchor, "RIGHT", 6, 0)
@@ -6023,7 +6023,7 @@ function LockRemindersSettingsEdit(parent, anchor, field, fallback, width, onApp
 	box:SetScript("OnEditFocusLost", function(self)
 		local text = self:GetText() or ""
 		text = text:gsub("^%s+", ""):gsub("%s+$", "")
-		if text == "" then
+		if text == "" and not allowEmpty then
 			text = fallback
 		end
 		db[field] = text
@@ -8068,7 +8068,7 @@ function LockRemindersRefreshSoul()
 	end
 	if bar.shardLabel and bar.shardLabel.SetText and not bar.shardLabel:HasFocus() then
 		bar.shardLabel.quiet = true
-		bar.shardLabel:SetText(LockRemindersClassLabel("shardLabel", "NO SHARDS"))
+		bar.shardLabel:SetText(LockRemindersClassLabel("shardLabel", false))
 		bar.shardLabel.quiet = nil
 	end
 	if bar.banishMove and bar.banishMove.label then
@@ -8326,7 +8326,7 @@ function LockRemindersBuildSoul(owner)
 	bar.shardLabel = LockRemindersSettingsEdit(shards, shardTextLabel, "shardLabel", "NO SHARDS", 120, function()
 		LockRemindersApplyClassLook()
 		LockRemindersUpdateClassAlerts()
-	end)
+	end, true)
 	bar.shardMove = LockRemindersSettingsButton(shards, bar.shardLabel, "Move", 10, function()
 		LockRemindersCreateClassAlerts()
 		LockRemindersWarlock.shardMoving = not LockRemindersWarlock.shardMoving
@@ -8547,10 +8547,13 @@ end
 function LockRemindersClassLabel(field, fallback)
 	local text = db and db[field]
 	if type(text) ~= "string" then
+		if fallback == false then
+			return ""
+		end
 		return fallback
 	end
 	text = text:gsub("^%s+", ""):gsub("%s+$", "")
-	if text == "" then
+	if text == "" and fallback ~= false then
 		return fallback
 	end
 	return text
@@ -8644,8 +8647,9 @@ function LockRemindersUpdateClassAlerts()
 		shards.count:SetText(tostring(count))
 		if zero then
 			shards.count:SetTextColor(1, 0.35, 0.25)
-			shards.text:SetText(LockRemindersClassLabel("shardLabel", "NO SHARDS"))
-			shards.text:Show()
+			local label = LockRemindersClassLabel("shardLabel", false)
+			shards.text:SetText(label)
+			shards.text:SetShown(label ~= "")
 		else
 			shards.count:SetTextColor(1, 0.97, 0.86)
 			shards.text:SetText("")
@@ -9122,13 +9126,13 @@ local function CreatePanel()
 	HookItemLinks()
 
 	tabs = {}
-	MakeTab("Powers", "powers", 14, 136)
-	MakeTab("Consumables", "food", 158, 136)
-	MakeTab("Talents", "talents", 302, 136)
-	MakeTab("Spell alerts", "spells", 446, 136)
-	MakeTab("Miscellaneous", "misc", 590, 136)
+	MakeTab("Buffs", "powers", 14, 136)
+	MakeTab("Items", "food", 158, 136)
+	MakeTab("Procs", "talents", 302, 136)
+	MakeTab("Spell misses/resist", "spells", 446, 136)
+	MakeTab("Status", "misc", 590, 136)
 	if LockRemindersIsWarlock() then
-		MakeTab("Soulstone", "soul", 732, 130)
+		MakeTab("Warlock", "soul", 732, 130)
 	end
 
 	panel.backButton = CreateFrame("Button", nil, panel, "BackdropTemplate")
@@ -9874,12 +9878,12 @@ local function ShowAuras()
 end
 
 local function Help()
-	Print("Click the minimap icon to add powers and food.")
+	Print("Click the minimap icon to add buffs and items.")
 	Print("Drag the alert border to move it. /lr lock keeps it still.")
 	Print("Each module has its own alert. Configure alert opens its size and position.")
-	Print("Talents lists the buff from the talent. Nightfall shows Shadow Trance.")
-	Print("Spell alerts: add a spell or a pet spell. Only those miss and resist.")
-	Print("Miscellaneous: speed, low health, and low mana. /lr misc")
+	Print("Procs lists the buff from the talent. Nightfall shows Shadow Trance.")
+	Print("Spell misses/resist: add a spell or a pet spell. Only those miss and resist.")
+	Print("Status: speed, low health, and low mana. /lr misc")
 	Print("Soulstone tracker is for warlocks. /lr soul")
 	Print("/lr arrange  —  arrange the icons inside the alert.")
 	Print("/lr  —  opens the window.")
