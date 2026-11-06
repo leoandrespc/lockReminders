@@ -1,0 +1,9 @@
+## Interface: 16001, 120105
+## Title: LockReminders
+## Notes: Reminds you about your pet, raid food, buffs, spell misses, speed, low health or mana, and soulstones.
+## Author: leo
+## Version: 1.4.0
+## SavedVariables: LockRemindersDB
+## IconTexture: 136216
+
+Core.lua
