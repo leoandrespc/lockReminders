@@ -5908,11 +5908,8 @@ function LockRemindersLayoutItemAlert()
 		size = 96
 	end
 	db.foodSize = size
-	local foodOn = foodFrame.showFood ~= false
-	local stoneOn = foodFrame.showStone and true or false
-	if not foodOn and not stoneOn then
-		foodOn = true
-	end
+	local foodOn = foodFrame.showFood == true
+	local stoneOn = foodFrame.showStone == true
 	local thick = LockRemindersGlowThick(size, "foodGlowSize")
 	local cell = size + thick * 2
 	local red, green, blue = LockRemindersReadGlow("foodGlow", 1, 0.82, 0.35)
@@ -5930,6 +5927,9 @@ function LockRemindersLayoutItemAlert()
 			end
 		end
 		if not on then
+			if glow and glow.plate then
+				glow.plate:Hide()
+			end
 			return
 		end
 		local col = (index - 1) % cols
@@ -6046,8 +6046,25 @@ function ShowFoodPreview(show)
 	end
 	foodFrame.hint:SetShown(foodFrame.moving)
 	if foodFrame.moving then
-		foodFrame.showFood = true
+		local hasFood = false
+		if type(db.foodItems) == "table" then
+			for _ in pairs(db.foodItems) do
+				hasFood = true
+				break
+			end
+		end
+		if not hasFood and type(db.food) == "table" then
+			for _ in pairs(db.food) do
+				hasFood = true
+				break
+			end
+		end
+		foodFrame.showFood = hasFood
 		foodFrame.showStone = type(db.healthstone) == "table"
+		if hasFood then
+			local foodIcon = FoodLabel()
+			foodFrame.icon:SetTexture(foodIcon or 134062)
+		end
 	end
 	ApplyFoodLook()
 	ApplyFoodPoint()
@@ -12114,6 +12131,7 @@ function CreateFoodAlert()
 	LockRemindersRoundIcon(foodFrame.icon)
 	foodFrame.glow = LockRemindersMakeEvenGlow(foodFrame)
 	LockRemindersTintEvenGlow(foodFrame.glow, 1, 0.82, 0.35)
+	foodFrame.glow:Hide()
 	foodFrame.stone = foodFrame:CreateTexture(nil, "ARTWORK")
 	foodFrame.stone:SetTexCoord(0.08, 0.92, 0.08, 0.92)
 	LockRemindersRoundIcon(foodFrame.stone)
