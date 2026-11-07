@@ -3,7 +3,12 @@ local ADDON = ...
 local WARLOCK = "WARLOCK"
 local CREATE_HEALTHSTONE = 6201
 local SACRIFICE = 108503
-local HEALTHSTONES = { 5512, 224464 }
+local HEALTHSTONES = {
+	5512, 5511, 5509, 5510, 9421,
+	22103, 22104, 22105,
+	36889, 36890, 36891, 36892, 36893, 36894,
+	224464,
+}
 local BROWSER_LIMIT = 80
 
 local BACKDROP = {
@@ -263,10 +268,15 @@ local function HasAura(spellID)
 		end
 		return false
 	end
+	local listHidden = false
 	if C_UnitAuras and C_UnitAuras.GetBuffDataByIndex then
 		for index = 1, 40 do
 			local ok, aura = pcall(C_UnitAuras.GetBuffDataByIndex, "player", index)
-			if not ok or aura == nil or aura == false or (issecretvalue and issecretvalue(aura)) then
+			if not ok or (issecretvalue and issecretvalue(aura)) then
+				listHidden = true
+				break
+			end
+			if aura == nil or aura == false then
 				break
 			end
 			local id = aura.spellId or aura.spellID
@@ -274,7 +284,9 @@ local function HasAura(spellID)
 			if sameID(id) then
 				return true
 			end
-			if wanted and type(name) == "string" and not (issecretvalue and issecretvalue(name)) and name:lower() == wanted then
+			if issecretvalue and (issecretvalue(id) or issecretvalue(name)) then
+				listHidden = true
+			elseif wanted and type(name) == "string" and name:lower() == wanted then
 				return true
 			end
 		end
@@ -292,7 +304,7 @@ local function HasAura(spellID)
 	if found == false then
 		return false
 	end
-	if absent and not InCombatLockdown() then
+	if absent and not listHidden and not InCombatLockdown() then
 		return false
 	end
 	return nil
@@ -495,9 +507,13 @@ end
 
 local function HasHealthstone()
 	for i = 1, #HEALTHSTONES do
-		if ItemCount(HEALTHSTONES[i]) > 0 then
+		local ok, count = pcall(ItemCount, HEALTHSTONES[i])
+		if ok and type(count) == "number" and count > 0 then
 			return true
 		end
+	end
+	if LockRemindersHasHealthstone then
+		return LockRemindersHasHealthstone()
 	end
 	return false
 end
@@ -852,11 +868,12 @@ local function Missing()
 				end
 				if left and left > 0 then
 					has = true
-				elseif left == 0 or (LockRemindersBuffUntil[spellID] and now >= LockRemindersBuffUntil[spellID]) then
-					has = false
+				else
 					left = nil
-					LockRemindersBuffUntil[spellID] = nil
-					LockRemindersAuraSync[spellID] = nil
+					if LockRemindersBuffUntil[spellID] and now >= LockRemindersBuffUntil[spellID] then
+						LockRemindersBuffUntil[spellID] = nil
+						LockRemindersAuraSync[spellID] = nil
+					end
 				end
 			end
 			if left and left > 15 and C_Timer and C_Timer.After then
@@ -910,25 +927,21 @@ local function Missing()
 		end
 	end
 
-	if type(db.healthstone) == "table" and ScopeActive(db.healthstone) and LockRemindersIsWarlock() then
-		local showStone = true
-		if inCombat and not db.healthstone.combat then
-			showStone = false
-		end
-		if showStone and not HasHealthstone() then
-			list[#list + 1] = {
-				key = "healthstone",
-				icon = SpellIcon(CREATE_HEALTHSTONE),
-				text = "Healthstone",
-			}
-		end
-	end
-
 	return list
 end
 
 local GAP = 8
 local PAD = 10
+
+function LockRemindersIconPad()
+	local pad = tonumber(db and db.iconPad) or 8
+	if pad < 0 then
+		pad = 0
+	elseif pad > 48 then
+		pad = 48
+	end
+	return pad
+end
 
 local function IconSize()
 	local size = tonumber(db and db.iconSize) or 40
@@ -969,13 +982,6 @@ local function Tracked()
 			key = "pet",
 			icon = 136216,
 			text = "Pet",
-		}
-	end
-	if type(db.healthstone) == "table" and LockRemindersIsWarlock() then
-		list[#list + 1] = {
-			key = "healthstone",
-			icon = SpellIcon(CREATE_HEALTHSTONE),
-			text = "Healthstone",
 		}
 	end
 	local ids = {}
@@ -1081,9 +1087,11 @@ end
 
 local function IndexAt(px, py, count)
 	local size = IconSize()
+	local pad = LockRemindersIconPad()
+	local step = size + LockRemindersGlowThick(size, "buffGlowSize") * 2 + pad
 	local cols = ColumnsFor(count)
-	local col = math.floor((px - PAD) / (size + GAP))
-	local line = math.floor((py - PAD) / (size + GAP))
+	local col = math.floor((px - pad) / step)
+	local line = math.floor((py - pad) / step)
 	if col < 0 then
 		col = 0
 	end
@@ -1105,8 +1113,8 @@ end
 
 local function FitRow(row)
 	local size = IconSize()
-	row:SetSize(size, size)
-	row.glow:SetSize(size * 1.9, size * 1.9)
+	local thick = LockRemindersPlaceAlertIcon(row.icon, row.glow, size, "CENTER", "buffGlowSize")
+	row:SetSize(size + thick * 2, size + thick * 2)
 	if row.count then
 		local font = row.count:GetFont()
 		if type(font) ~= "string" or font == "" then
@@ -1114,9 +1122,258 @@ local function FitRow(row)
 		end
 		row.count:SetFont(font, math.max(14, math.floor(size * 0.62)), "OUTLINE")
 	end
+	LockRemindersTintEvenGlow(row.glow, LockRemindersReadGlow("buffGlow", 1, 0.82, 0.35))
 end
 
 local Refresh
+
+function LockRemindersGlowThick(size, field)
+	local thick = 2
+	if field and db and type(db[field]) == "number" then
+		thick = db[field]
+	end
+	if thick < 0 then
+		thick = 0
+	elseif thick > 16 then
+		thick = 16
+	end
+	return math.floor(thick)
+end
+
+function LockRemindersMakeEvenGlow(parent)
+	local glow = CreateFrame("Frame", nil, parent)
+	glow:SetFrameLevel(parent:GetFrameLevel() or 1)
+	glow.plate = parent:CreateTexture(nil, "BORDER", nil, 7)
+	glow.plate:SetTexture("Interface\\Buttons\\WHITE8x8")
+	glow.plate:SetBlendMode("ADD")
+	if parent.CreateMaskTexture and glow.plate.AddMaskTexture then
+		glow.mask = parent:CreateMaskTexture()
+		glow.mask:SetTexture("Interface\\COMMON\\common-iconmask")
+		glow.plate:AddMaskTexture(glow.mask)
+	end
+	glow:SetScript("OnShow", function(self)
+		if self.plate then
+			self.plate:Show()
+		end
+	end)
+	glow:SetScript("OnHide", function(self)
+		if self.plate then
+			self.plate:Hide()
+		end
+	end)
+	glow:SetScript("OnUpdate", function(self, elapsed)
+		if not self.plate or not self:IsShown() then
+			return
+		end
+		self.pulse = (self.pulse or 0) + (elapsed or 0)
+		local wave = 0.45 + 0.55 * (0.5 + 0.5 * math.sin(self.pulse * 6))
+		self.plate:SetAlpha(wave)
+	end)
+	local ag = glow:CreateAnimationGroup()
+	ag:SetLooping("BOUNCE")
+	glow.ag = ag
+	return glow
+end
+
+function LockRemindersFitEvenGlow(glow, icon, size, field)
+	if not glow or not glow.plate or not icon then
+		return
+	end
+	local thick = LockRemindersGlowThick(size, field)
+	glow:ClearAllPoints()
+	glow:SetPoint("TOPLEFT", icon, "TOPLEFT", -thick, thick)
+	glow:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", thick, -thick)
+	glow.plate:ClearAllPoints()
+	glow.plate:SetPoint("TOPLEFT", icon, "TOPLEFT", -thick, thick)
+	glow.plate:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", thick, -thick)
+	if glow.mask then
+		glow.mask:ClearAllPoints()
+		glow.mask:SetAllPoints(glow.plate)
+	end
+end
+
+function LockRemindersPlaceAlertIcon(icon, glow, size, anchor, field)
+	if not icon then
+		return 0
+	end
+	local thick = LockRemindersGlowThick(size, field)
+	icon:ClearAllPoints()
+	if anchor == "TOP" then
+		icon:SetPoint("TOP", 0, -thick)
+	else
+		icon:SetPoint("CENTER")
+	end
+	icon:SetSize(size, size)
+	LockRemindersFitEvenGlow(glow, icon, size, field)
+	return thick
+end
+
+function LockRemindersGlowBorderControl(parent, anchor, gap, field, onChange)
+	local label = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	label:SetPoint("LEFT", anchor, "RIGHT", gap or 12, 0)
+	label:SetText("Border")
+	label:SetTextColor(0.9, 0.84, 1)
+	local text = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	local function write(delta)
+		local nextValue = LockRemindersGlowThick(0, field) + delta
+		if nextValue < 0 then
+			nextValue = 0
+		elseif nextValue > 16 then
+			nextValue = 16
+		end
+		db[field] = nextValue
+		text:SetText(tostring(nextValue))
+		if onChange then
+			onChange()
+		end
+	end
+	local minus = LockRemindersStepButton(parent, "-")
+	minus:SetPoint("LEFT", label, "RIGHT", 6, 0)
+	minus:SetScript("OnClick", function()
+		write(-1)
+	end)
+	text:SetPoint("LEFT", minus, "RIGHT", 4, 0)
+	text:SetWidth(20)
+	text:SetJustifyH("CENTER")
+	text:SetText(tostring(LockRemindersGlowThick(0, field)))
+	local plus = LockRemindersStepButton(parent, "+")
+	plus:SetPoint("LEFT", text, "RIGHT", 2, 0)
+	plus:SetScript("OnClick", function()
+		write(1)
+	end)
+	plus.borderText = text
+	return plus
+end
+
+function LockRemindersTintEvenGlow(glow, red, green, blue, alpha)
+	if not glow then
+		return
+	end
+	alpha = alpha or 1
+	if glow.plate then
+		glow.plate:SetVertexColor(red, green, blue, alpha)
+	end
+end
+
+function LockRemindersReadGlow(field, red, green, blue)
+	local color = db and db[field]
+	local savedRed = type(color) == "table" and tonumber(color.r) or nil
+	local savedGreen = type(color) == "table" and tonumber(color.g) or nil
+	local savedBlue = type(color) == "table" and tonumber(color.b) or nil
+	if not savedRed or not savedGreen or not savedBlue then
+		return red, green, blue
+	end
+	return savedRed, savedGreen, savedBlue
+end
+
+function LockRemindersPaintGlowButton(button, field, red, green, blue)
+	if not button then
+		return
+	end
+	local savedRed, savedGreen, savedBlue = LockRemindersReadGlow(field, red, green, blue)
+	Paint(button, savedRed, savedGreen, savedBlue, 1, 0.95, 0.9, 1, 1)
+end
+
+function LockRemindersPickGlow(field, red, green, blue, onChange)
+	if not ColorPickerFrame or not db then
+		return
+	end
+	local currentRed, currentGreen, currentBlue = LockRemindersReadGlow(field, red, green, blue)
+	local previous = { r = currentRed, g = currentGreen, b = currentBlue }
+	local function apply(nextRed, nextGreen, nextBlue)
+		if not nextRed or not db then
+			return
+		end
+		db[field] = { r = nextRed, g = nextGreen, b = nextBlue }
+		if onChange then
+			onChange()
+		end
+	end
+	local function read()
+		if ColorPickerFrame.GetColorRGB then
+			return ColorPickerFrame:GetColorRGB()
+		end
+	end
+	if ColorPickerFrame.SetupColorPickerAndShow then
+		ColorPickerFrame:SetupColorPickerAndShow({
+			r = currentRed,
+			g = currentGreen,
+			b = currentBlue,
+			hasOpacity = false,
+			swatchFunc = function()
+				apply(read())
+			end,
+			cancelFunc = function()
+				apply(previous.r, previous.g, previous.b)
+			end,
+		})
+		return
+	end
+	ColorPickerFrame.hasOpacity = false
+	ColorPickerFrame.func = function()
+		apply(read())
+	end
+	ColorPickerFrame.cancelFunc = function()
+		apply(previous.r, previous.g, previous.b)
+	end
+	ColorPickerFrame.previousValues = { currentRed, currentGreen, currentBlue }
+	if ColorPickerFrame.SetColorRGB then
+		ColorPickerFrame:SetColorRGB(currentRed, currentGreen, currentBlue)
+	end
+	ColorPickerFrame:Hide()
+	ColorPickerFrame:Show()
+end
+
+function LockRemindersGlowSwatch(parent, anchor, gap, field, red, green, blue, onChange)
+	local label = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	label:SetPoint("LEFT", anchor, "RIGHT", gap or 12, 0)
+	label:SetText("Glow")
+	label:SetTextColor(0.9, 0.84, 1)
+	local button = CreateFrame("Button", nil, parent, "BackdropTemplate")
+	button:SetSize(22, 22)
+	button:SetPoint("LEFT", label, "RIGHT", 8, 0)
+	button.caption = label
+	button:SetScript("OnClick", function(self)
+		LockRemindersPickGlow(field, red, green, blue, function()
+			LockRemindersPaintGlowButton(self, field, red, green, blue)
+			if onChange then
+				onChange()
+			end
+		end)
+	end)
+	LockRemindersPaintGlowButton(button, field, red, green, blue)
+	return button
+end
+
+function LockRemindersSmoothIcon(icon)
+	if not icon then
+		return
+	end
+	if icon.SetSnapToPixelGrid then
+		icon:SetSnapToPixelGrid(false)
+	end
+	if icon.SetTexelSnappingBias then
+		icon:SetTexelSnappingBias(0)
+	end
+end
+
+function LockRemindersRoundIcon(icon)
+	if not icon or icon.LockRemindersMask then
+		return
+	end
+	if icon.SetMask then
+		pcall(icon.SetMask, icon, "")
+	end
+	local parent = icon.GetParent and icon:GetParent()
+	if not parent or not parent.CreateMaskTexture or not icon.AddMaskTexture then
+		return
+	end
+	local mask = parent:CreateMaskTexture()
+	mask:SetAllPoints(icon)
+	mask:SetTexture("Interface\\COMMON\\common-iconmask")
+	icon:AddMaskTexture(mask)
+	icon.LockRemindersMask = mask
+end
 
 local function Row(index)
 	local row = rows[index]
@@ -1131,27 +1388,12 @@ local function Row(index)
 	row:SetSize(IconSize(), IconSize())
 
 	row.icon = row:CreateTexture(nil, "ARTWORK")
-	row.icon:SetAllPoints()
 	row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+	LockRemindersRoundIcon(row.icon)
 
-	row.glow = CreateFrame("Frame", nil, row)
-	row.glow:SetPoint("CENTER")
-	row.glow:SetSize(IconSize() * 1.9, IconSize() * 1.9)
-	row.glow:SetFrameLevel(row:GetFrameLevel() + 2)
-	row.glow.tex = row.glow:CreateTexture(nil, "OVERLAY")
-	row.glow.tex:SetAllPoints()
-	row.glow.tex:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
-	row.glow.tex:SetBlendMode("ADD")
-	row.glow.tex:SetVertexColor(1, 0.82, 0.35)
-
-	local ag = row.glow:CreateAnimationGroup()
-	ag:SetLooping("BOUNCE")
-	local alpha = ag:CreateAnimation("Alpha")
-	alpha:SetFromAlpha(0.15)
-	alpha:SetToAlpha(1)
-	alpha:SetDuration(0.55)
-	alpha:SetSmoothing("IN_OUT")
-	row.glow.ag = ag
+	row.glow = LockRemindersMakeEvenGlow(row)
+	LockRemindersTintEvenGlow(row.glow, 1, 0.82, 0.35)
+	LockRemindersFitEvenGlow(row.glow, row.icon, IconSize(), "buffGlowSize")
 
 	row.count = row:CreateFontString(nil, "OVERLAY")
 	row.count:SetPoint("CENTER", row.icon, "CENTER", 0, 0)
@@ -1246,6 +1488,8 @@ end
 
 local function PlaceList(list, missingKeys)
 	local size = IconSize()
+	local pad = LockRemindersIconPad()
+	local cell = size + LockRemindersGlowThick(size, "buffGlowSize") * 2
 	local count = #list
 	local cols = ColumnsFor(count)
 	local lines = math.max(1, math.ceil(count / cols))
@@ -1259,7 +1503,7 @@ local function PlaceList(list, missingKeys)
 		local col = (i - 1) % cols
 		local line = math.floor((i - 1) / cols)
 		row:ClearAllPoints()
-		row:SetPoint("TOPLEFT", frame, "TOPLEFT", PAD + col * (size + GAP), -(PAD + line * (size + GAP)))
+		row:SetPoint("TOPLEFT", frame, "TOPLEFT", pad + col * (cell + pad), -(pad + line * (cell + pad)))
 		row:SetFrameLevel((frame:GetFrameLevel() or 1) + 2)
 		row:EnableMouse(arranging)
 		if arranging and missingKeys and not missingKeys[row.key] then
@@ -1294,12 +1538,12 @@ local function PlaceList(list, missingKeys)
 			PlayGlow(row)
 		end
 	end
-	LockRemindersSetSoonWatch(watching or LockRemindersSoonPending)
+	LockRemindersSetSoonWatch(watching or LockRemindersSoonPending or LockRemindersFoodSoon)
 	for i = count + 1, #rows do
 		rows[i]:Hide()
 		rows[i].key = nil
 	end
-	frame:SetSize(PAD * 2 + cols * size + (cols - 1) * GAP, PAD * 2 + lines * size + (lines - 1) * GAP)
+	frame:SetSize(pad * 2 + cols * cell + (cols - 1) * pad, pad * 2 + lines * cell + (lines - 1) * pad)
 	frame:SetFrameStrata(arranging and "DIALOG" or "MEDIUM")
 	ApplyFrameChrome()
 	if frame.hint then
@@ -1329,7 +1573,7 @@ Refresh = function()
 	local list = previewing and preview.list or (arranging and Tracked() or Missing())
 	if not list then
 		frame:Hide()
-		LockRemindersSetSoonWatch(false)
+		LockRemindersSetSoonWatch(LockRemindersFoodSoon and true or false)
 		return
 	end
 
@@ -1338,7 +1582,7 @@ Refresh = function()
 	SortEntries(list)
 	if #list == 0 then
 		frame:Hide()
-		LockRemindersSetSoonWatch(LockRemindersSoonPending and true or false)
+		LockRemindersSetSoonWatch((LockRemindersSoonPending or LockRemindersFoodSoon) and true or false)
 		return
 	end
 
@@ -1364,6 +1608,20 @@ local function ChangeSize(delta)
 		size = 80
 	end
 	db.iconSize = size
+	Refresh()
+	if activeTab == "alert" and ShowLayout then
+		ShowLayout(false)
+	end
+end
+
+function LockRemindersChangePad(delta)
+	local pad = LockRemindersIconPad() + delta
+	if pad < 0 then
+		pad = 0
+	elseif pad > 48 then
+		pad = 48
+	end
+	db.iconPad = pad
 	Refresh()
 	if activeTab == "alert" and ShowLayout then
 		ShowLayout(false)
@@ -1499,7 +1757,9 @@ local function AddFood(spellID)
 		return
 	end
 	db.food[spellID] = true
-	Print("Food added: " .. info.name .. ". In a raid it alerts if none of the list is active.")
+	local always, party, raid = ScopeFlags(addScope)
+	LockRemindersWriteFoodScope(nil, spellID, { always = always, party = party, raid = raid, combat = false })
+	Print("Food added: " .. info.name .. ".")
 	Touch()
 end
 
@@ -1577,10 +1837,12 @@ local function AddFoodItem(itemID)
 	end
 	local spellID = ItemUseSpell(itemID)
 	db.foodItems[itemID] = spellID or true
+	local always, party, raid = ScopeFlags(addScope)
+	LockRemindersWriteFoodScope(itemID, nil, { always = always, party = party, raid = raid, combat = false })
 	if spellID then
 		Print("Consumable added: " .. name .. ".")
 	else
-		Print(name .. " is on the list. In a raid it alerts if its buff is missing.")
+		Print(name .. " is on the list.")
 	end
 	Touch()
 end
@@ -1775,21 +2037,19 @@ PlayerHasBuff = function(spellID)
 			fresh = true
 		end
 	end
-	if fresh then
+	local unknown = false
+	local function present()
+		LockRemindersBuffGone[spellID] = nil
 		LockRemindersBuffKnown[spellID] = true
 		return true
 	end
-	if LockRemindersBuffGone[spellID] then
-		LockRemindersBuffKnown[spellID] = false
-		return false
+	if fresh then
+		return present()
 	end
-	local unknown = false
 	for index = 1, #aliases do
 		local has = HasAura(aliases[index])
 		if has then
-			LockRemindersBuffGone[spellID] = nil
-			LockRemindersBuffKnown[spellID] = true
-			return true
+			return present()
 		end
 		if has == nil then
 			unknown = true
@@ -1804,9 +2064,7 @@ PlayerHasBuff = function(spellID)
 			end
 		end)
 		if matched then
-			LockRemindersBuffGone[spellID] = nil
-			LockRemindersBuffKnown[spellID] = true
-			return true
+			return present()
 		end
 	end
 	if not unknown then
@@ -1817,9 +2075,7 @@ PlayerHasBuff = function(spellID)
 		end
 		return false
 	end
-	local untilAt = LockRemindersBuffUntil and LockRemindersBuffUntil[spellID]
-	if untilAt and GetTime() >= untilAt then
-		LockRemindersBuffGone[spellID] = true
+	if LockRemindersBuffGone[spellID] then
 		LockRemindersBuffKnown[spellID] = false
 		return false
 	end
@@ -2031,6 +2287,26 @@ local function EachBagItem(callback)
 	end
 end
 
+function LockRemindersHasHealthstone()
+	local found = false
+	EachBagItem(function(itemID)
+		if found or not itemID then
+			return
+		end
+		for index = 1, #HEALTHSTONES do
+			if itemID == HEALTHSTONES[index] then
+				found = true
+				return
+			end
+		end
+		local name = Normalize(ItemName(itemID) or "")
+		if name:find("healthstone", 1, true) or name:find("piedra de salud", 1, true) then
+			found = true
+		end
+	end)
+	return found
+end
+
 local function BagContents()
 	local counts = {}
 	local icons = {}
@@ -2219,10 +2495,9 @@ local function SpellEntry(spellID, name, icon, sub, kind)
 		end
 	end
 	if kind == "food" and savedKey then
-		entry.combatToggle = true
-		if FoodInCombat(nil, savedKey) then
-			entry.sub = (entry.sub or "On your list") .. " · Combat"
-		end
+		entry.scopes = true
+		entry.foodScope = true
+		entry.sub = "On your list · " .. ScopeLabel(LockRemindersFoodScope(nil, savedKey))
 	end
 	if kind ~= "food" and kind ~= "talent" and savedKey then
 		entry.scopes = true
@@ -2242,10 +2517,9 @@ local function ItemEntry(itemID, name, icon, sub, rank)
 		rank = rank or 0,
 	}
 	if entry.saved then
-		entry.combatToggle = true
-		if FoodInCombat(itemID) then
-			entry.sub = (entry.sub or "") .. " · Combat"
-		end
+		entry.scopes = true
+		entry.foodScope = true
+		entry.sub = (sub or "On your list") .. " · " .. ScopeLabel(LockRemindersFoodScope(itemID, nil))
 	end
 	entry.action = function()
 		if db.foodItems[itemID] then
@@ -2729,20 +3003,73 @@ local function CollectSaved(query)
 	)
 end
 
+function LockRemindersCacheMissNames()
+	if not db or type(db.missSpells) ~= "table" then
+		return
+	end
+	if type(db.missNames) ~= "table" then
+		db.missNames = {}
+	end
+	for key in pairs(db.missSpells) do
+		local spellID = tonumber(key)
+		if spellID then
+			local name = SpellName(spellID)
+			local wanted = Normalize(name or "")
+			if wanted ~= "" and not wanted:find("^spell ", 1, true) and not wanted:find("^hechizo ", 1, true) then
+				db.missNames[tostring(spellID)] = name
+			end
+		end
+	end
+end
+
 function LockRemindersMissSpellSaved(spellID, spellName)
 	if not db or type(db.missSpells) ~= "table" then
+		return false
+	end
+	if LockRemindersSecret(spellID) then
+		for key in pairs(db.missSpells) do
+			local saved = tonumber(key)
+			if saved and LockRemindersSameSpell(spellID, saved) then
+				return true
+			end
+		end
 		return false
 	end
 	spellID = tonumber(spellID)
 	if spellID and (db.missSpells[spellID] or db.missSpells[tostring(spellID)]) then
 		return true
 	end
+	if spellID then
+		for key in pairs(db.missSpells) do
+			local saved = tonumber(key)
+			if saved then
+				local aliases = SpellAliases(saved)
+				for index = 1, #aliases do
+					if aliases[index] == spellID then
+						return true
+					end
+				end
+			end
+		end
+	end
 	local wanted = Normalize(spellName or "")
 	if wanted == "" or wanted:find("^spell ", 1, true) or wanted:find("^hechizo ", 1, true) then
 		return false
 	end
+	if type(db.missNames) == "table" then
+		for _, name in pairs(db.missNames) do
+			if Normalize(name or "") == wanted then
+				return true
+			end
+		end
+	end
 	for key in pairs(db.missSpells) do
-		if Normalize(SpellName(key) or "") == wanted then
+		local name = SpellName(key)
+		if Normalize(name or "") == wanted then
+			if type(db.missNames) ~= "table" then
+				db.missNames = {}
+			end
+			db.missNames[tostring(tonumber(key) or key)] = name
 			return true
 		end
 	end
@@ -2755,6 +3082,7 @@ function LockRemindersAddMissSpell(spellID)
 		return
 	end
 	db.missSpells[spellID] = true
+	LockRemindersCacheMissNames()
 	Print((SpellName(spellID) or "Spell") .. " will alert when it misses or resists.")
 	Touch()
 end
@@ -3263,6 +3591,9 @@ local function AcquireRow()
 		end
 		box:SetScript("OnClick", function()
 			local settings = row.entry and ((row.entry.pet and db.pet) or (row.entry.stone and db.healthstone))
+			if row.entry and row.entry.foodScope then
+				settings = LockRemindersFoodScope(row.entry.itemID, row.entry.spellID)
+			end
 			if type(settings) == "table" then
 				local always, party, raid = ScopeFlags(settings)
 				local current = always
@@ -3286,6 +3617,8 @@ local function AcquireRow()
 				end
 				if row.entry.pet then
 					db.pet = scope
+				elseif row.entry.foodScope then
+					LockRemindersWriteFoodScope(row.entry.itemID, row.entry.spellID, scope)
 				else
 					db.healthstone = scope
 				end
@@ -3396,7 +3729,7 @@ local function FillRow(row, entry)
 		row.scopes.combat:SetShown(true)
 		row.scopes.combat:ClearAllPoints()
 		if full then
-			local where = (entry.pet and db.pet) or (entry.stone and db.healthstone) or AuraScope(entry.spellID)
+			local where = (entry.pet and db.pet) or (entry.stone and db.healthstone) or (entry.foodScope and LockRemindersFoodScope(entry.itemID, entry.spellID)) or AuraScope(entry.spellID)
 			local always, party, raid = ScopeFlags(where)
 			row.scopes.raid:SetChecked(raid)
 			row.scopes.party:SetChecked(party)
@@ -3504,6 +3837,8 @@ local function StepButton(parent, text)
 	return button
 end
 
+LockRemindersStepButton = StepButton
+
 local function EnsureLayout()
 	if layoutRoot or not scrollChild then
 		return
@@ -3538,6 +3873,8 @@ local function EnsureLayout()
 	sizePlus:SetScript("OnClick", function()
 		ChangeSize(4)
 	end)
+	layoutRoot.buffGlow = LockRemindersGlowSwatch(layoutRoot, sizePlus, 18, "buffGlow", 1, 0.82, 0.35, Refresh)
+	LockRemindersGlowBorderControl(layoutRoot, layoutRoot.buffGlow, 12, "buffGlowSize", Refresh)
 
 	caption("Per row", -40)
 	local colsMinus = StepButton(layoutRoot, "-")
@@ -3554,6 +3891,24 @@ local function EnsureLayout()
 	colsPlus:SetPoint("LEFT", colsValue, "RIGHT", 2, 0)
 	colsPlus:SetScript("OnClick", function()
 		ChangeColumns(1)
+	end)
+	local padLabel = layoutRoot:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	padLabel:SetPoint("LEFT", colsPlus, "RIGHT", 18, 0)
+	padLabel:SetText("Padding")
+	padLabel:SetTextColor(0.9, 0.84, 1)
+	local padMinus = StepButton(layoutRoot, "-")
+	padMinus:SetPoint("LEFT", padLabel, "RIGHT", 8, 0)
+	padMinus:SetScript("OnClick", function()
+		LockRemindersChangePad(-2)
+	end)
+	layoutRoot.padValue = layoutRoot:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	layoutRoot.padValue:SetPoint("LEFT", padMinus, "RIGHT", 6, 0)
+	layoutRoot.padValue:SetWidth(28)
+	layoutRoot.padValue:SetJustifyH("CENTER")
+	local padPlus = StepButton(layoutRoot, "+")
+	padPlus:SetPoint("LEFT", layoutRoot.padValue, "RIGHT", 2, 0)
+	padPlus:SetScript("OnClick", function()
+		LockRemindersChangePad(2)
 	end)
 
 	lockButton = CreateFrame("Button", nil, layoutRoot, "BackdropTemplate")
@@ -3827,6 +4182,9 @@ ShowLayout = function(resetScroll)
 	if not scroll or not scrollChild then
 		return
 	end
+	if LockRemindersItemLayout then
+		LockRemindersItemLayout:Hide()
+	end
 	EnsureLayout()
 	if not layoutRoot then
 		return
@@ -3835,6 +4193,9 @@ ShowLayout = function(resetScroll)
 	layoutRoot:SetWidth(math.max(scroll:GetWidth(), 200))
 	sizeValue:SetText(tostring(IconSize()))
 	colsValue:SetText(ColumnsLabel())
+	if layoutRoot and layoutRoot.padValue then
+		layoutRoot.padValue:SetText(tostring(LockRemindersIconPad()))
+	end
 	lockButton.label:SetText(db.locked and "Unlock frame" or "Lock frame")
 	frameButton.label:SetText(db.showFrame and "Hide frame" or "Show frame")
 	if db.showFrame then
@@ -3904,6 +4265,728 @@ HideLayout = function()
 	if layoutRoot then
 		layoutRoot:Hide()
 	end
+	if LockRemindersItemLayout then
+		LockRemindersItemLayout:Hide()
+	end
+end
+
+function LockRemindersFoodScope(itemID, spellID)
+	local key = FoodCombatKey(itemID, spellID)
+	if type(db.foodScope) == "table" and key and type(db.foodScope[key]) == "table" then
+		local scope = db.foodScope[key]
+		return {
+			always = scope.always and true or false,
+			party = scope.party and true or false,
+			raid = scope.raid and true or false,
+			combat = scope.combat and true or false,
+		}
+	end
+	return {
+		always = false,
+		party = false,
+		raid = true,
+		combat = FoodInCombat(itemID, spellID),
+	}
+end
+
+function LockRemindersWriteFoodScope(itemID, spellID, scope)
+	if type(db.foodScope) ~= "table" then
+		db.foodScope = {}
+	end
+	local key = FoodCombatKey(itemID, spellID)
+	if not key or type(scope) ~= "table" then
+		return
+	end
+	db.foodScope[key] = {
+		always = scope.always and true or false,
+		party = scope.party and true or false,
+		raid = scope.raid and true or false,
+		combat = scope.combat and true or false,
+	}
+	SetFoodCombat(itemID, spellID, scope.combat)
+end
+
+function LockRemindersFoodScopeLabel()
+	local label
+	local function take(itemID, spellID)
+		local text = ScopeLabel(LockRemindersFoodScope(itemID, spellID))
+		if not label then
+			label = text
+		elseif label ~= text then
+			label = "Mixed"
+		end
+	end
+	if type(db.foodItems) == "table" then
+		for itemID in pairs(db.foodItems) do
+			take(itemID, nil)
+		end
+	end
+	if type(db.food) == "table" then
+		for spellID in pairs(db.food) do
+			take(nil, spellID)
+		end
+	end
+	return label or "Raid"
+end
+
+function LockRemindersFoodColumns()
+	local cols = math.floor(tonumber(db and db.foodColumns) or 0)
+	if cols < 0 then
+		cols = 0
+	elseif cols > 12 then
+		cols = 12
+	end
+	return cols
+end
+
+function LockRemindersFoodColumnsLabel()
+	local cols = LockRemindersFoodColumns()
+	if cols < 1 then
+		return "one row"
+	end
+	return tostring(cols)
+end
+
+function LockRemindersChangeFoodColumns(delta)
+	local count = math.max(#LockRemindersItemCatalog(), 1)
+	local cols = LockRemindersFoodColumns()
+	if cols < 1 then
+		cols = count
+	end
+	cols = cols + delta
+	if cols < 1 then
+		cols = 1
+	end
+	if cols >= count then
+		db.foodColumns = 0
+	else
+		db.foodColumns = cols
+	end
+	ApplyFoodLook()
+	LockRemindersShowItemLayout(false)
+end
+
+function LockRemindersFoodPad()
+	local pad = tonumber(db and db.foodPad) or 8
+	if pad < 0 then
+		pad = 0
+	elseif pad > 48 then
+		pad = 48
+	end
+	return pad
+end
+
+function LockRemindersChangeFoodPad(delta)
+	local pad = LockRemindersFoodPad() + delta
+	if pad < 0 then
+		pad = 0
+	elseif pad > 48 then
+		pad = 48
+	end
+	db.foodPad = pad
+	ApplyFoodLook()
+	LockRemindersShowItemLayout(false)
+end
+
+function LockRemindersToggleItemArrange()
+	if not LockRemindersItemArranging and Restricted() then
+		Print("Leave combat to arrange the icons.")
+		return
+	end
+	if not LockRemindersItemArranging and #LockRemindersItemCatalog() == 0 then
+		Print("Nothing to arrange yet.")
+		return
+	end
+	LockRemindersItemArranging = not LockRemindersItemArranging
+	if LockRemindersItemArranging then
+		Print("Drag each icon inside the alert. Press Done when you finish.")
+	end
+	if RefreshFood then
+		RefreshFood()
+	end
+	LockRemindersShowItemLayout(false)
+end
+
+function LockRemindersApplyFoodChrome()
+	if not foodFrame then
+		return
+	end
+	local show = db and (db.foodShowFrame or LockRemindersItemArranging)
+	foodFrame:SetFrameStrata(LockRemindersItemArranging and "DIALOG" or "HIGH")
+	if foodFrame.hint then
+		if LockRemindersItemArranging then
+			foodFrame.hint:SetText("Drag the icons")
+			foodFrame.hint:Show()
+		elseif foodFrame.moving then
+			foodFrame.hint:SetText("Drag")
+			foodFrame.hint:Show()
+		else
+			foodFrame.hint:Hide()
+		end
+	end
+	if not show then
+		pcall(foodFrame.SetBackdrop, foodFrame, nil)
+		return
+	end
+	Paint(foodFrame, 0.06, 0.05, 0.08, 0.92, 1, 1, 1, 1)
+	local red, green, blue = ClassColor()
+	if LockRemindersItemArranging then
+		red, green, blue = 0.95, 0.78, 0.35
+	end
+	pcall(foodFrame.SetBackdropBorderColor, foodFrame, red, green, blue, 1)
+end
+
+function LockRemindersStyleFoodIcon()
+	if not foodFrame or not foodFrame.icon then
+		return
+	end
+	local number = foodFrame.foodNumber
+	local quiet = type(number) == "number"
+	if foodFrame.icon.SetDesaturated then
+		foodFrame.icon:SetDesaturated(quiet)
+	end
+	if quiet then
+		foodFrame.icon:SetVertexColor(0.55, 0.55, 0.55)
+		if foodFrame.glow then
+			foodFrame.glow:Hide()
+		end
+		if foodFrame.count then
+			local font = foodFrame.count:GetFont()
+			if type(font) ~= "string" or font == "" then
+				font = "Fonts\\FRIZQT__.TTF"
+			end
+			local size = tonumber(db and db.foodSize) or 48
+			foodFrame.count:SetFont(font, math.max(14, math.floor(size * 0.62)), "OUTLINE")
+			foodFrame.count:SetText(tostring(number))
+			foodFrame.count:Show()
+		end
+	else
+		foodFrame.icon:SetVertexColor(1, 1, 1)
+		if foodFrame.count then
+			foodFrame.count:Hide()
+		end
+	end
+	local alpha = foodFrame.foodDim and 0.45 or 1
+	foodFrame.icon:SetAlpha(alpha)
+	if foodFrame.glow then
+		foodFrame.glow:SetAlpha(alpha)
+	end
+	if foodFrame.stone then
+		local stoneAlpha = foodFrame.stoneDim and 0.45 or 1
+		foodFrame.stone:SetAlpha(stoneAlpha)
+		if foodFrame.stoneGlow then
+			foodFrame.stoneGlow:SetAlpha(stoneAlpha)
+		end
+	end
+end
+
+function LockRemindersDropItem(key)
+	if not foodFrame or not db then
+		return
+	end
+	local scale = foodFrame:GetEffectiveScale()
+	if not scale or scale == 0 then
+		scale = 1
+	end
+	local x, y = GetCursorPosition()
+	x, y = x / scale, y / scale
+	local px = x - (foodFrame:GetLeft() or 0)
+	local py = (foodFrame:GetTop() or 0) - y
+	local size = tonumber(db.foodSize) or 48
+	local pad = LockRemindersFoodPad()
+	local step = size + LockRemindersGlowThick(size, "foodGlowSize") * 2 + pad
+	local count = #LockRemindersSortedItems()
+	local cols = LockRemindersFoodColumns()
+	if cols < 1 or cols > count then
+		cols = math.max(count, 1)
+	end
+	local col = math.floor((px - pad) / step)
+	local line = math.floor((py - pad) / step)
+	if col < 0 then
+		col = 0
+	elseif col >= cols then
+		col = cols - 1
+	end
+	if line < 0 then
+		line = 0
+	end
+	local index = line * cols + col + 1
+	if index < 1 then
+		index = 1
+	elseif index > count then
+		index = count
+	end
+	LockRemindersMoveItem(key, index)
+end
+
+function LockRemindersBindItemDrag(hit, icon, glow, key)
+	hit:RegisterForDrag("LeftButton")
+	hit:SetScript("OnDragStart", function(self)
+		if not LockRemindersItemArranging then
+			return
+		end
+		self:SetScript("OnUpdate", function()
+			local scale = foodFrame:GetEffectiveScale()
+			if not scale or scale == 0 then
+				scale = 1
+			end
+			local cursorX, cursorY = GetCursorPosition()
+			cursorX, cursorY = cursorX / scale, cursorY / scale
+			local px = cursorX - (foodFrame:GetLeft() or 0)
+			local py = (foodFrame:GetTop() or 0) - cursorY
+			icon:ClearAllPoints()
+			icon:SetPoint("CENTER", foodFrame, "TOPLEFT", px, -py)
+			LockRemindersFitEvenGlow(glow, icon, tonumber(db.foodSize) or 48, "foodGlowSize")
+		end)
+	end)
+	hit:SetScript("OnDragStop", function(self)
+		self:SetScript("OnUpdate", nil)
+		LockRemindersDropItem(key)
+	end)
+end
+
+function LockRemindersItemCatalog()
+	local list = {}
+	if not db then
+		return list
+	end
+	local hasFood = false
+	if type(db.foodItems) == "table" then
+		for _ in pairs(db.foodItems) do
+			hasFood = true
+			break
+		end
+	end
+	if not hasFood and type(db.food) == "table" then
+		for _ in pairs(db.food) do
+			hasFood = true
+			break
+		end
+	end
+	if hasFood then
+		local icon, text = FoodLabel()
+		list[#list + 1] = { key = "food", icon = icon, text = (text or "Food") .. "  ·  " .. LockRemindersFoodScopeLabel() }
+	end
+	if type(db.healthstone) == "table" then
+		local icon = SpellIcon(CREATE_HEALTHSTONE)
+		if icon == nil or icon == 134400 then
+			icon = ItemIcon(5512) or 135230
+		end
+		list[#list + 1] = {
+			key = "healthstone",
+			icon = icon,
+			text = "Healthstone  ·  " .. ScopeLabel(db.healthstone),
+		}
+	end
+	return list
+end
+
+function LockRemindersSyncItemOrder(list)
+	if type(db.itemOrder) ~= "table" then
+		db.itemOrder = {}
+	end
+	local known = {}
+	for index = 1, #list do
+		known[list[index].key] = true
+	end
+	local kept = {}
+	local seen = {}
+	for index = 1, #db.itemOrder do
+		local key = db.itemOrder[index]
+		if known[key] and not seen[key] then
+			kept[#kept + 1] = key
+			seen[key] = true
+		end
+	end
+	for index = 1, #list do
+		local key = list[index].key
+		if not seen[key] then
+			kept[#kept + 1] = key
+			seen[key] = true
+		end
+	end
+	db.itemOrder = kept
+end
+
+function LockRemindersSortedItems()
+	local list = LockRemindersItemCatalog()
+	LockRemindersSyncItemOrder(list)
+	local rank = {}
+	for index = 1, #db.itemOrder do
+		rank[db.itemOrder[index]] = index
+	end
+	table.sort(list, function(a, b)
+		return (rank[a.key] or 99) < (rank[b.key] or 99)
+	end)
+	return list
+end
+
+function LockRemindersMoveItem(key, newIndex)
+	local list = LockRemindersSortedItems()
+	local order = db.itemOrder
+	local old
+	for index = 1, #order do
+		if order[index] == key then
+			old = index
+			break
+		end
+	end
+	if not old or newIndex < 1 or newIndex > #order or newIndex == old then
+		return
+	end
+	table.remove(order, old)
+	table.insert(order, newIndex, key)
+	ApplyFoodLook()
+	if foodFrame and foodFrame:IsShown() then
+		foodFrame:Show()
+	end
+	LockRemindersShowItemLayout(false)
+end
+
+function LockRemindersShowItemLayout(resetScroll)
+	if not scroll or not scrollChild or not db then
+		return
+	end
+	if activeTab ~= "alert" or not panel or (panel.alertModule or "powers") ~= "food" then
+		return
+	end
+	local root = LockRemindersItemLayout
+	if not root then
+		root = CreateFrame("Frame", nil, scrollChild)
+		root:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 0, 0)
+		root:SetPoint("TOPRIGHT", scrollChild, "TOPRIGHT", 0, 0)
+		root.rows = {}
+		local perLabel = root:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+		perLabel:SetPoint("TOPLEFT", 8, -8)
+		perLabel:SetText("Per row")
+		perLabel:SetTextColor(0.9, 0.84, 1)
+		local colsMinus = StepButton(root, "-")
+		colsMinus:SetPoint("TOPLEFT", 160, -4)
+		colsMinus:SetScript("OnClick", function()
+			LockRemindersChangeFoodColumns(-1)
+		end)
+		root.colsValue = root:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		root.colsValue:SetPoint("LEFT", colsMinus, "RIGHT", 6, 0)
+		root.colsValue:SetWidth(52)
+		root.colsValue:SetJustifyH("CENTER")
+		root.colsValue:SetTextColor(0.9, 0.84, 1)
+		local colsPlus = StepButton(root, "+")
+		colsPlus:SetPoint("LEFT", root.colsValue, "RIGHT", 2, 0)
+		colsPlus:SetScript("OnClick", function()
+			LockRemindersChangeFoodColumns(1)
+		end)
+		local padLabel = root:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		padLabel:SetPoint("LEFT", colsPlus, "RIGHT", 18, 0)
+		padLabel:SetText("Padding")
+		padLabel:SetTextColor(0.9, 0.84, 1)
+		local padMinus = StepButton(root, "-")
+		padMinus:SetPoint("LEFT", padLabel, "RIGHT", 8, 0)
+		padMinus:SetScript("OnClick", function()
+			LockRemindersChangeFoodPad(-2)
+		end)
+		root.padValue = root:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+		root.padValue:SetPoint("LEFT", padMinus, "RIGHT", 6, 0)
+		root.padValue:SetWidth(28)
+		root.padValue:SetJustifyH("CENTER")
+		local padPlus = StepButton(root, "+")
+		padPlus:SetPoint("LEFT", root.padValue, "RIGHT", 2, 0)
+		padPlus:SetScript("OnClick", function()
+			LockRemindersChangeFoodPad(2)
+		end)
+		root.lock = CreateFrame("Button", nil, root, "BackdropTemplate")
+		root.lock:SetSize(108, 22)
+		root.lock:SetPoint("TOPLEFT", 8, -40)
+		Paint(root.lock, 0.14, 0.1, 0.2, 1, 0.58, 0.45, 0.82, 1)
+		root.lock.label = root.lock:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		root.lock.label:SetPoint("CENTER")
+		root.lock:SetScript("OnClick", function()
+			local open = foodFrame and foodFrame.moving or db.foodLocked == false
+			Print(open and "Frame locked." or "Frame unlocked. Drag the alert.")
+			ShowFoodPreview(not open)
+		end)
+		root.lock:SetScript("OnEnter", function(self)
+			self:SetBackdropColor(0.28, 0.2, 0.42, 1)
+		end)
+		root.lock:SetScript("OnLeave", function(self)
+			self:SetBackdropColor(0.14, 0.1, 0.2, 1)
+			local open = foodFrame and foodFrame.moving or db.foodLocked == false
+			self:SetBackdropBorderColor(open and 0.95 or 0.58, open and 0.78 or 0.45, open and 0.35 or 0.82, 1)
+		end)
+		root.arrange = CreateFrame("Button", nil, root, "BackdropTemplate")
+		root.arrange:SetSize(124, 22)
+		root.arrange:SetPoint("LEFT", root.lock, "RIGHT", 8, 0)
+		Paint(root.arrange, 0.14, 0.1, 0.2, 1, 0.58, 0.45, 0.82, 1)
+		root.arrange.label = root.arrange:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		root.arrange.label:SetPoint("CENTER")
+		root.arrange:SetScript("OnClick", LockRemindersToggleItemArrange)
+		root.arrange:SetScript("OnEnter", function(self)
+			self:SetBackdropColor(0.28, 0.2, 0.42, 1)
+		end)
+		root.arrange:SetScript("OnLeave", function(self)
+			self:SetBackdropColor(0.14, 0.1, 0.2, 1)
+			if LockRemindersItemArranging then
+				self:SetBackdropBorderColor(0.95, 0.78, 0.35, 1)
+			end
+		end)
+		root.reset = CreateFrame("Button", nil, root, "BackdropTemplate")
+		root.reset:SetSize(108, 22)
+		root.reset:SetPoint("LEFT", root.arrange, "RIGHT", 8, 0)
+		Paint(root.reset, 0.14, 0.1, 0.2, 1, 0.58, 0.45, 0.82, 1)
+		root.reset.label = root.reset:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		root.reset.label:SetPoint("CENTER")
+		root.reset.label:SetText("Reset order")
+		root.reset:SetScript("OnClick", function()
+			db.itemOrder = {}
+			ApplyFoodLook()
+			LockRemindersShowItemLayout(false)
+			Print("Order reset.")
+		end)
+		root.reset:SetScript("OnEnter", function(self)
+			self:SetBackdropColor(0.28, 0.2, 0.42, 1)
+		end)
+		root.reset:SetScript("OnLeave", function(self)
+			self:SetBackdropColor(0.14, 0.1, 0.2, 1)
+		end)
+		root.frameButton = CreateFrame("Button", nil, root, "BackdropTemplate")
+		root.frameButton:SetSize(124, 22)
+		root.frameButton:SetPoint("TOPLEFT", 8, -72)
+		Paint(root.frameButton, 0.14, 0.1, 0.2, 1, 0.58, 0.45, 0.82, 1)
+		root.frameButton.label = root.frameButton:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		root.frameButton.label:SetPoint("CENTER")
+		root.frameButton:SetScript("OnClick", function()
+			db.foodShowFrame = not db.foodShowFrame
+			Print(db.foodShowFrame and "Alert frame shown, in your class color." or "Alert frame hidden.")
+			ApplyFoodLook()
+			LockRemindersShowItemLayout(false)
+		end)
+		root.frameButton:SetScript("OnEnter", function(self)
+			self:SetBackdropColor(0.28, 0.2, 0.42, 1)
+		end)
+		root.frameButton:SetScript("OnLeave", function(self)
+			self:SetBackdropColor(0.14, 0.1, 0.2, 1)
+			if db.foodShowFrame then
+				local red, green, blue = ClassColor()
+				self:SetBackdropBorderColor(red, green, blue, 1)
+			end
+		end)
+		local lastLabel = root:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+		lastLabel:SetPoint("TOPLEFT", 8, -108)
+		lastLabel:SetText("Last 10s")
+		lastLabel:SetTextColor(0.9, 0.84, 1)
+		root.countButton = CreateFrame("Button", nil, root, "BackdropTemplate")
+		root.countButton:SetSize(72, 22)
+		root.countButton:SetPoint("TOPLEFT", 160, -104)
+		Paint(root.countButton, 0.14, 0.1, 0.2, 1, 0.58, 0.45, 0.82, 1)
+		root.countButton.label = root.countButton:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		root.countButton.label:SetPoint("CENTER")
+		root.countButton.label:SetText("Count")
+		root.countButton:SetScript("OnClick", function()
+			db.foodRemind = "count"
+			if RefreshFood then
+				RefreshFood()
+			end
+			LockRemindersShowItemLayout(false)
+		end)
+		root.alertButton = CreateFrame("Button", nil, root, "BackdropTemplate")
+		root.alertButton:SetSize(88, 22)
+		root.alertButton:SetPoint("LEFT", root.countButton, "RIGHT", 8, 0)
+		Paint(root.alertButton, 0.14, 0.1, 0.2, 1, 0.58, 0.45, 0.82, 1)
+		root.alertButton.label = root.alertButton:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		root.alertButton.label:SetPoint("CENTER")
+		root.alertButton.label:SetText("Reminder")
+		root.alertButton:SetScript("OnClick", function()
+			db.foodRemind = "alert"
+			if RefreshFood then
+				RefreshFood()
+			end
+			LockRemindersShowItemLayout(false)
+		end)
+		root.testButton = CreateFrame("Button", nil, root, "BackdropTemplate")
+		root.testButton:SetSize(72, 22)
+		root.testButton:SetPoint("LEFT", root.alertButton, "RIGHT", 8, 0)
+		Paint(root.testButton, 0.14, 0.1, 0.2, 1, 0.95, 0.45, 0.35, 1)
+		root.testButton.label = root.testButton:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		root.testButton.label:SetPoint("CENTER")
+		root.testButton.label:SetText("Test")
+		root.testButton:SetScript("OnClick", function()
+			local counting = db.foodRemind ~= "alert"
+			local function show(left, seconds)
+				LockRemindersFoodPreview = { at = GetTime() + seconds, left = left }
+				if RefreshFood then
+					RefreshFood()
+				end
+			end
+			local function finish()
+				LockRemindersFoodPreviewTimer = nil
+				LockRemindersFoodPreview = nil
+				if RefreshFood then
+					RefreshFood()
+				end
+			end
+			if LockRemindersFoodPreviewTimer then
+				LockRemindersFoodPreviewTimer:Cancel()
+				LockRemindersFoodPreviewTimer = nil
+			end
+			if not counting then
+				show(nil, 2.4)
+				LockRemindersFoodPreviewTimer = C_Timer.NewTimer(2.4, finish)
+				return
+			end
+			local number = 10
+			local function step()
+				if number >= 0 then
+					show(number, 0.5)
+					number = number - 1
+					LockRemindersFoodPreviewTimer = C_Timer.NewTimer(0.4, step)
+					return
+				end
+				show(nil, 1.6)
+				LockRemindersFoodPreviewTimer = C_Timer.NewTimer(1.6, finish)
+			end
+			step()
+		end)
+		root.result = root:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		root.result:SetPoint("LEFT", root.testButton, "RIGHT", 12, 0)
+		root.result:SetTextColor(0.9, 0.84, 1)
+		root.countButton:SetScript("OnEnter", function(self)
+			self:SetBackdropColor(0.28, 0.2, 0.42, 1)
+		end)
+		root.countButton:SetScript("OnLeave", function()
+			LockRemindersShowItemLayout(false)
+		end)
+		root.alertButton:SetScript("OnEnter", function(self)
+			self:SetBackdropColor(0.28, 0.2, 0.42, 1)
+		end)
+		root.alertButton:SetScript("OnLeave", function()
+			LockRemindersShowItemLayout(false)
+		end)
+		root.testButton:SetScript("OnEnter", function(self)
+			self:SetBackdropColor(0.28, 0.2, 0.42, 1)
+		end)
+		root.testButton:SetScript("OnLeave", function(self)
+			self:SetBackdropColor(0.14, 0.1, 0.2, 1)
+		end)
+		root.title = root:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+		root.title:SetPoint("TOPLEFT", 8, -144)
+		root.title:SetText("Order inside the alert")
+		root.title:SetTextColor(0.9, 0.82, 1)
+		root.empty = root:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		root.empty:SetPoint("TOPLEFT", 8, -172)
+		root.empty:SetWidth(420)
+		root.empty:SetJustifyH("LEFT")
+		root.empty:SetText("Add an item and you can order it here.")
+		root.empty:SetTextColor(0.75, 0.7, 0.84)
+		root.empty:Hide()
+		LockRemindersItemLayout = root
+	end
+	root:Show()
+	root:SetWidth(math.max(scroll:GetWidth(), 200))
+	local open = foodFrame and foodFrame.moving or db.foodLocked == false
+	root.lock.label:SetText(open and "Lock frame" or "Unlock frame")
+	root.lock:SetBackdropBorderColor(open and 0.95 or 0.58, open and 0.78 or 0.45, open and 0.35 or 0.82, 1)
+	if root.colsValue then
+		root.colsValue:SetText(LockRemindersFoodColumnsLabel())
+	end
+	if root.padValue then
+		root.padValue:SetText(tostring(LockRemindersFoodPad()))
+	end
+	if root.arrange then
+		root.arrange.label:SetText(LockRemindersItemArranging and "Done" or "Arrange")
+		root.arrange:SetBackdropBorderColor(LockRemindersItemArranging and 0.95 or 0.58, LockRemindersItemArranging and 0.78 or 0.45, LockRemindersItemArranging and 0.35 or 0.82, 1)
+	end
+	if root.frameButton then
+		root.frameButton.label:SetText(db.foodShowFrame and "Hide frame" or "Show frame")
+		if db.foodShowFrame then
+			local red, green, blue = ClassColor()
+			root.frameButton:SetBackdropBorderColor(red, green, blue, 1)
+		else
+			root.frameButton:SetBackdropBorderColor(0.58, 0.45, 0.82, 1)
+		end
+	end
+	if root.countButton and root.alertButton then
+		local counting = db.foodRemind ~= "alert"
+		if root.result then
+			root.result:SetText(counting and "Gray icon, 10 to 0" or "Glowing icon")
+		end
+		if counting then
+			Paint(root.countButton, 0.32, 0.22, 0.08, 1, 0.95, 0.78, 0.35, 1)
+			root.countButton.label:SetTextColor(1, 0.93, 0.72)
+			Paint(root.alertButton, 0.14, 0.1, 0.2, 1, 0.58, 0.45, 0.82, 1)
+			root.alertButton.label:SetTextColor(0.86, 0.82, 0.94)
+		else
+			Paint(root.alertButton, 0.32, 0.22, 0.08, 1, 0.95, 0.78, 0.35, 1)
+			root.alertButton.label:SetTextColor(1, 0.93, 0.72)
+			Paint(root.countButton, 0.14, 0.1, 0.2, 1, 0.58, 0.45, 0.82, 1)
+			root.countButton.label:SetTextColor(0.86, 0.82, 0.94)
+		end
+	end
+	local list = LockRemindersSortedItems()
+	for index = 1, #list do
+		local row = root.rows[index]
+		if not row then
+			row = CreateFrame("Frame", nil, root)
+			row:SetHeight(32)
+			row.icon = row:CreateTexture(nil, "ARTWORK")
+			row.icon:SetSize(24, 24)
+			row.icon:SetPoint("LEFT", 4, 0)
+			row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+			row.down = StepButton(row, "Bajar")
+			row.down:SetSize(52, 22)
+			row.down:SetPoint("RIGHT", -4, 0)
+			row.up = StepButton(row, "Subir")
+			row.up:SetSize(52, 22)
+			row.up:SetPoint("RIGHT", row.down, "LEFT", -4, 0)
+			row.name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+			row.name:SetPoint("LEFT", row.icon, "RIGHT", 8, 0)
+			row.name:SetPoint("RIGHT", row.up, "LEFT", -8, 0)
+			row.name:SetJustifyH("LEFT")
+			row.name:SetWordWrap(false)
+			row.up:SetScript("OnClick", function()
+				if row.key and row.index and row.index > 1 then
+					LockRemindersMoveItem(row.key, row.index - 1)
+				end
+			end)
+			row.down:SetScript("OnClick", function()
+				if row.key and row.index then
+					LockRemindersMoveItem(row.key, row.index + 1)
+				end
+			end)
+			root.rows[index] = row
+		end
+		local entry = list[index]
+		row.key = entry.key
+		row.index = index
+		row.icon:SetTexture(entry.icon or 134400)
+		row.name:SetText(entry.text)
+		row:ClearAllPoints()
+		row:SetPoint("TOPLEFT", root, "TOPLEFT", 0, -(172 + (index - 1) * 34))
+		row:SetPoint("TOPRIGHT", root, "TOPRIGHT", 0, -(172 + (index - 1) * 34))
+		local canUp = index > 1
+		local canDown = index < #list
+		row.up:SetAlpha(canUp and 1 or 0.35)
+		row.down:SetAlpha(canDown and 1 or 0.35)
+		row.up:EnableMouse(canUp)
+		row.down:EnableMouse(canDown)
+		row:Show()
+	end
+	for index = #list + 1, #root.rows do
+		root.rows[index]:Hide()
+	end
+	local height = 200 + #list * 34
+	if #list == 0 then
+		root.empty:Show()
+		height = 220
+	else
+		root.empty:Hide()
+	end
+	root:SetHeight(height)
+	scrollChild:SetWidth(scroll:GetWidth())
+	scrollChild:SetHeight(height)
+	if resetScroll then
+		scroll:SetVerticalScroll(0)
+	end
+	UpdateScrollMetrics()
+	C_Timer.After(0, UpdateScrollMetrics)
 end
 
 local function RebuildList(resetScroll)
@@ -3913,8 +4996,22 @@ local function RebuildList(resetScroll)
 
 	if activeTab == "alert" then
 		local module = panel.alertModule or "powers"
+		if module == "food" then
+			HideLayout()
+			ReleaseBrowser()
+			emptyLabel:Hide()
+			scroll:Show()
+			if scrollBar then
+				scrollBar:Show()
+			end
+			LockRemindersShowItemLayout(resetScroll)
+			return
+		end
 		if module ~= "powers" then
 			HideLayout()
+			if LockRemindersItemLayout then
+				LockRemindersItemLayout:Hide()
+			end
 			ReleaseBrowser()
 			emptyLabel:Hide()
 			scroll:Hide()
@@ -4138,7 +5235,7 @@ local function UpdateTalentChrome()
 	local showMisc = activeTab == "misc"
 	local showSoul = activeTab == "soul"
 	local showFun = activeTab == "fun"
-	local hideList = (activeTab == "alert" and module ~= "powers") or showMisc or showSoul or showFun
+	local hideList = (activeTab == "alert" and module ~= "powers" and module ~= "food") or showMisc or showSoul or showFun
 	if panel and panel.miscBar then
 		panel.miscBar:SetShown(showMisc)
 		if showMisc then
@@ -4162,7 +5259,7 @@ local function UpdateTalentChrome()
 	end
 	local listTop = -180
 	if activeTab == "alert" then
-		listTop = -88
+		listTop = module == "food" and -160 or -88
 	end
 	scroll:ClearAllPoints()
 	scroll:SetPoint("TOPLEFT", 14, listTop)
@@ -4210,9 +5307,9 @@ local function SetTab(id)
 			end
 		end
 	end
-	local powers = id == "powers"
-	raidCheck:SetShown(powers)
-	raidCheck.labelButton:SetShown(powers)
+	local picking = id == "powers" or id == "food"
+	raidCheck:SetShown(picking)
+	raidCheck.labelButton:SetShown(picking)
 	modeHint:Hide()
 	local showConfig = id == "powers" or id == "food" or id == "talents" or id == "spells"
 	if panel.alertButton then
@@ -4457,9 +5554,12 @@ local function ApplyTalentLook()
 		return
 	end
 	local size = TalentSize()
-	talentFrame:SetSize(size, size)
-	talentFrame.glow:SetSize(size * 2.15, size * 2.15)
+	local thick = LockRemindersPlaceAlertIcon(talentFrame.icon, talentFrame.glow, size, "CENTER", "talentGlowSize")
+	talentFrame:SetSize(size + thick * 2, size + thick * 2)
+	LockRemindersTintEvenGlow(talentFrame.glow, LockRemindersReadGlow("talentGlow", 1, 0.82, 0.35))
 	talentFrame.burst:SetSize(size * 2.6, size * 2.6)
+	talentFrame.burst:ClearAllPoints()
+	talentFrame.burst:SetPoint("CENTER", 0, 0)
 	if talentMoving then
 		Paint(talentFrame, 0.06, 0.05, 0.08, 0.55, 0.95, 0.78, 0.35, 1)
 		talentFrame.hint:Show()
@@ -4640,10 +5740,6 @@ local function PlayTalent(spellID, preview)
 		talentFrame.pop:Play()
 	end
 	if db.talentScreenFlash ~= false then
-		if talentFrame.burstAg then
-			talentFrame.burstAg:Stop()
-			talentFrame.burstAg:Play()
-		end
 		PlayScreenFlash()
 	else
 		QuietScreenFlash()
@@ -4801,20 +5897,107 @@ function WatchTalents(prime)
 	talentSeen = now
 end
 
-function ApplyFoodLook()
+function LockRemindersLayoutItemAlert()
 	if not foodFrame or not db then
 		return
 	end
 	local size = tonumber(db.foodSize) or 48
 	if size < 24 then
 		size = 24
-	end
-	if size > 96 then
+	elseif size > 96 then
 		size = 96
 	end
 	db.foodSize = size
-	foodFrame:SetSize(size, size)
-	foodFrame.glow:SetSize(size * 1.8, size * 1.8)
+	local foodOn = foodFrame.showFood ~= false
+	local stoneOn = foodFrame.showStone and true or false
+	if not foodOn and not stoneOn then
+		foodOn = true
+	end
+	local thick = LockRemindersGlowThick(size, "foodGlowSize")
+	local cell = size + thick * 2
+	local red, green, blue = LockRemindersReadGlow("foodGlow", 1, 0.82, 0.35)
+	local function place(icon, glow, on, index, cols, pad)
+		if not icon then
+			return
+		end
+		icon:SetShown(on)
+		if glow then
+			glow:SetShown(on)
+			if on and glow.ag and not glow.ag:IsPlaying() then
+				glow.ag:Play()
+			elseif glow.ag and not on then
+				glow.ag:Stop()
+			end
+		end
+		if not on then
+			return
+		end
+		local col = (index - 1) % cols
+		local line = math.floor((index - 1) / cols)
+		icon:ClearAllPoints()
+		icon:SetSize(size, size)
+		icon:SetPoint("TOPLEFT", foodFrame, "TOPLEFT", pad + col * (cell + pad) + thick, -(pad + line * (cell + pad) + thick))
+		LockRemindersFitEvenGlow(glow, icon, size, "foodGlowSize")
+		LockRemindersTintEvenGlow(glow, red, green, blue)
+	end
+	local slots = {}
+	if foodOn then
+		slots[#slots + 1] = { key = "food", icon = foodFrame.icon, glow = foodFrame.glow, order = 1 }
+	end
+	if stoneOn then
+		slots[#slots + 1] = { key = "healthstone", icon = foodFrame.stone, glow = foodFrame.stoneGlow, order = 2 }
+	end
+	local rank = {}
+	if type(db.itemOrder) == "table" then
+		for index = 1, #db.itemOrder do
+			rank[db.itemOrder[index]] = index
+		end
+	end
+	table.sort(slots, function(a, b)
+		local left = rank[a.key] or 99
+		local right = rank[b.key] or 99
+		if left == right then
+			return a.order < b.order
+		end
+		return left < right
+	end)
+	local pad = LockRemindersFoodPad()
+	local cols = LockRemindersFoodColumns()
+	local count = #slots
+	if cols < 1 or cols > count then
+		cols = math.max(count, 1)
+	end
+	local lines = math.max(1, math.ceil(count / cols))
+	foodFrame:SetSize(pad * 2 + cols * cell + math.max(0, cols - 1) * pad, pad * 2 + lines * cell + math.max(0, lines - 1) * pad)
+	local shown = {}
+	for index = 1, #slots do
+		place(slots[index].icon, slots[index].glow, true, index, cols, pad)
+		shown[slots[index].key] = true
+	end
+	if not shown.food then
+		place(foodFrame.icon, foodFrame.glow, false)
+	end
+	if not shown.healthstone then
+		place(foodFrame.stone, foodFrame.stoneGlow, false)
+	end
+	if foodFrame.foodHit then
+		foodFrame.foodHit:ClearAllPoints()
+		foodFrame.foodHit:SetAllPoints(foodFrame.icon)
+		foodFrame.foodHit:SetShown(LockRemindersItemArranging and foodFrame.icon:IsShown())
+		foodFrame.foodHit:EnableMouse(LockRemindersItemArranging and foodFrame.icon:IsShown() and true or false)
+	end
+	if foodFrame.stoneHit then
+		foodFrame.stoneHit:ClearAllPoints()
+		foodFrame.stoneHit:SetAllPoints(foodFrame.stone)
+		foodFrame.stoneHit:SetShown(LockRemindersItemArranging and foodFrame.stone:IsShown())
+		foodFrame.stoneHit:EnableMouse(LockRemindersItemArranging and foodFrame.stone:IsShown() and true or false)
+	end
+	LockRemindersApplyFoodChrome()
+	LockRemindersStyleFoodIcon()
+end
+
+function ApplyFoodLook()
+	LockRemindersLayoutItemAlert()
 end
 
 function ApplyFoodPoint()
@@ -4855,12 +6038,29 @@ function ShowFoodPreview(show)
 		return
 	end
 	foodFrame.moving = show and true or false
+	foodFrame.foodNumber = nil
+	foodFrame.foodDim = false
+	foodFrame.stoneDim = false
+	if db then
+		db.foodLocked = not foodFrame.moving
+	end
 	foodFrame.hint:SetShown(foodFrame.moving)
+	if foodFrame.moving then
+		foodFrame.showFood = true
+		foodFrame.showStone = type(db.healthstone) == "table"
+	end
 	ApplyFoodLook()
 	ApplyFoodPoint()
 	if foodFrame.moving then
 		local icon = FoodLabel()
 		foodFrame.icon:SetTexture(icon)
+		if foodFrame.stone then
+			local stoneIcon = SpellIcon(CREATE_HEALTHSTONE)
+			if stoneIcon == nil or stoneIcon == 134400 then
+				stoneIcon = ItemIcon(5512) or 135230
+			end
+			foodFrame.stone:SetTexture(stoneIcon)
+		end
 		foodFrame:Show()
 		foodFrame:SetAlpha(1)
 		if foodFrame.glow.ag and not foodFrame.glow.ag:IsPlaying() then
@@ -4872,45 +6072,134 @@ function ShowFoodPreview(show)
 	if UpdateTalentChrome then
 		UpdateTalentChrome()
 	end
+	if LockRemindersShowItemLayout then
+		LockRemindersShowItemLayout(false)
+	end
 end
 
 function RefreshFood()
 	if not foodFrame or not db then
 		return
 	end
-	if foodFrame.moving then
+	if foodFrame.moving and not LockRemindersItemArranging then
 		foodFrame:Show()
 		return
 	end
-	if Blocked() or not IsInRaid() then
-		foodFrame:Hide()
-		return
+	LockRemindersFoodSoon = false
+	local preview = LockRemindersFoodPreview
+	local previewOn = preview and preview.at and GetTime() < preview.at
+	if preview and preview.at and not previewOn then
+		LockRemindersFoodPreview = nil
 	end
-	if InCombatLockdown() and not AnyFoodInCombat() then
-		foodFrame:Hide()
-		return
-	end
-	local foodAuras = FoodAuraIDs()
-	if #foodAuras == 0 then
-		foodFrame:Hide()
-		return
-	end
-	for index = 1, #foodAuras do
-		local has = HasAura(foodAuras[index])
-		if has == nil or has then
-			foodFrame:Hide()
+	local playing = false
+	local covered = false
+	local soonLeft
+	local function consider(itemID, spellID, auraID)
+		auraID = tonumber(auraID)
+		if not auraID or auraID <= 0 then
 			return
 		end
+		local scope = LockRemindersFoodScope(itemID, spellID)
+		if not ScopeActive(scope) then
+			return
+		end
+		if InCombatLockdown() and not scope.combat then
+			return
+		end
+		playing = true
+		local has = HasAura(auraID)
+		if has == nil or has == true then
+			covered = true
+			if has == true then
+				local left = LockRemindersAuraLeft(auraID)
+				if type(left) == "number" and left > 0 and left <= 15 then
+					LockRemindersFoodSoon = true
+					if left <= 10 and (not soonLeft or left < soonLeft) then
+						soonLeft = left
+					end
+				end
+			end
+		end
 	end
-	local icon = FoodLabel()
-	foodFrame.icon:SetTexture(icon)
+	if type(db.food) == "table" then
+		for spellID in pairs(db.food) do
+			consider(nil, spellID, spellID)
+		end
+	end
+	if type(db.foodItems) == "table" then
+		for itemID, value in pairs(db.foodItems) do
+			consider(itemID, nil, value)
+		end
+	end
+	if Blocked() then
+		playing = false
+		covered = false
+		soonLeft = nil
+		LockRemindersFoodSoon = false
+	end
+	local foodMissing = playing and not covered
+	local foodSoon = type(soonLeft) == "number" and soonLeft > 0 and soonLeft <= 10
+	local showFood = foodMissing or foodSoon or previewOn
+	local number
+	if previewOn then
+		number = preview.left
+		showFood = true
+	elseif foodSoon and db.foodRemind ~= "alert" then
+		number = math.ceil(soonLeft)
+	end
+	local stoneMissing = false
+	if not Blocked() and type(db.healthstone) == "table" and LockRemindersIsWarlock() and ScopeActive(db.healthstone) then
+		if not (InCombatLockdown() and not db.healthstone.combat) and not HasHealthstone() then
+			stoneMissing = true
+		end
+	end
+	local showStone = stoneMissing
+	if LockRemindersItemArranging then
+		local hasFood = false
+		if type(db.foodItems) == "table" then
+			for _ in pairs(db.foodItems) do
+				hasFood = true
+				break
+			end
+		end
+		if not hasFood and type(db.food) == "table" then
+			for _ in pairs(db.food) do
+				hasFood = true
+				break
+			end
+		end
+		showFood = hasFood
+		showStone = type(db.healthstone) == "table"
+		number = nil
+	end
+	if not showFood and not showStone then
+		foodFrame.foodNumber = nil
+		foodFrame:Hide()
+		if foodFrame.count then
+			foodFrame.count:Hide()
+		end
+		return
+	end
+	foodFrame.showFood = showFood
+	foodFrame.showStone = showStone
+	foodFrame.foodNumber = number
+	foodFrame.foodDim = LockRemindersItemArranging and not foodMissing and not foodSoon and not previewOn
+	foodFrame.stoneDim = LockRemindersItemArranging and not stoneMissing
+	if showFood then
+		local foodIcon = FoodLabel()
+		foodFrame.icon:SetTexture(foodIcon or 134062)
+	end
+	if showStone and foodFrame.stone then
+		local stoneIcon = SpellIcon(CREATE_HEALTHSTONE)
+		if stoneIcon == nil or stoneIcon == 134400 then
+			stoneIcon = ItemIcon(5512) or 135230
+		end
+		foodFrame.stone:SetTexture(stoneIcon)
+	end
 	ApplyFoodLook()
 	ApplyFoodPoint()
 	foodFrame:Show()
 	foodFrame:SetAlpha(1)
-	if foodFrame.glow.ag and not foodFrame.glow.ag:IsPlaying() then
-		foodFrame.glow.ag:Play()
-	end
 end
 
 function LockRemindersMissIconSize()
@@ -4972,13 +6261,9 @@ function ApplySpellMissLook()
 	local size = LockRemindersMissIconSize()
 	db.missSize = size
 	local width = math.max(size + 96, 240)
-	frame:SetSize(width, size + 92)
-	frame.icon:ClearAllPoints()
-	frame.icon:SetPoint("TOP", 0, -8)
-	frame.icon:SetSize(size, size)
-	frame.glow:ClearAllPoints()
-	frame.glow:SetPoint("CENTER", frame.icon, "CENTER", 0, 0)
-	frame.glow:SetSize(size * 2.05, size * 2.05)
+	local thick = LockRemindersPlaceAlertIcon(frame.icon, frame.glow, size, "TOP", "missGlowSize")
+	frame:SetSize(width, size + thick * 2 + 84)
+	LockRemindersTintEvenGlow(frame.glow, LockRemindersReadGlow("missGlow", 1, 0.15, 0.1))
 	frame.word:ClearAllPoints()
 	frame.word:SetPoint("TOP", frame.icon, "BOTTOM", 0, -6)
 	frame.word:SetWidth(width - 12)
@@ -5053,18 +6338,14 @@ function ShowSpellMiss(spellID, spellName, icon, kind, missType, destName)
 	frame.word:SetText(label)
 	frame.word:SetTextColor(wordR, wordG, wordB)
 	if frame.glow then
-		if missType == "IMMUNE" then
-			frame.glow:SetVertexColor(1, 0.75, 0.2, 0.9)
-		else
-			frame.glow:SetVertexColor(1, 0.15, 0.1, 0.9)
-		end
+		LockRemindersTintEvenGlow(frame.glow, LockRemindersReadGlow("missGlow", 1, 0.15, 0.1))
 	end
 	frame.spell:SetText(spellName or "Spell")
 	frame.detail:SetText(detail)
 	ApplySpellMissLook()
 	ApplySpellMissPoint()
 	frame:SetScale(1)
-	frame:SetAlpha(0)
+	frame:SetAlpha(1)
 	frame:Show()
 	if frame.fade then
 		pcall(function()
@@ -5192,12 +6473,11 @@ function CreateSpellMissAlert()
 		LockRemindersSaveSpellMissPoint()
 	end)
 	local frame = LockRemindersMiss.frame
-	frame.glow = frame:CreateTexture(nil, "BACKGROUND")
-	frame.glow:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
-	frame.glow:SetBlendMode("ADD")
-	frame.glow:SetVertexColor(1, 0.15, 0.1, 0.9)
+	frame.glow = LockRemindersMakeEvenGlow(frame)
+	LockRemindersTintEvenGlow(frame.glow, 1, 0.15, 0.1, 0.9)
 	frame.icon = frame:CreateTexture(nil, "ARTWORK")
 	frame.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+	LockRemindersRoundIcon(frame.icon)
 	frame.word = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
 	frame.word:SetJustifyH("CENTER")
 	frame.word:SetTextColor(1, 0.22, 0.18)
@@ -5221,7 +6501,7 @@ function CreateSpellMissAlert()
 
 	local intro = frame:CreateAnimationGroup()
 	local introFade = intro:CreateAnimation("Alpha")
-	introFade:SetFromAlpha(0)
+	introFade:SetFromAlpha(1)
 	introFade:SetToAlpha(1)
 	introFade:SetDuration(0.14)
 	introFade:SetOrder(1)
@@ -5265,6 +6545,17 @@ function CreateSpellMissAlert()
 		end
 	end)
 	frame.fade = fade
+	frame:SetScript("OnUpdate", function(self)
+		if self.fade and self.fade:IsPlaying() then
+			return
+		end
+		if self:IsShown() then
+			self:SetAlpha(1)
+			if (self:GetScale() or 1) < 0.85 then
+				self:SetScale(1)
+			end
+		end
+	end)
 	ApplySpellMissLook()
 	ApplySpellMissPoint()
 	frame:Hide()
@@ -5470,11 +6761,13 @@ function LockRemindersApplySpeedLook()
 		font = "Fonts\\FRIZQT__.TTF"
 	end
 	frame.text:SetFont(font, size, "OUTLINE")
-	local width = math.floor(size * 8 + 28)
-	if width < 128 then
-		width = 128
-	end
+	local split = db.speedSplit == true
+	local width = split and math.max(72, math.floor(size * 4 + 16)) or math.max(128, math.floor(size * 8 + 28))
 	frame:SetSize(width, size + 18)
+	if frame.target and frame.target.text then
+		frame.target.text:SetFont(font, size, "OUTLINE")
+		frame.target:SetSize(width, size + 18)
+	end
 end
 
 function LockRemindersUpdateSpeed()
@@ -5484,6 +6777,9 @@ function LockRemindersUpdateSpeed()
 	end
 	if db.speedShow == false and not LockRemindersMisc.speedMoving then
 		frame:Hide()
+		if frame.target then
+			frame.target:Hide()
+		end
 		return
 	end
 	local mine = LockRemindersReadSpeed("player")
@@ -5513,7 +6809,19 @@ function LockRemindersUpdateSpeed()
 	end
 	local left = frame.lastMine and (frame.lastMine .. "%") or "--"
 	local right = frame.lastTarget and (frame.lastTarget .. "%") or "--"
-	frame.text:SetText(left .. " / " .. right)
+	local split = db.speedSplit == true
+	if split then
+		frame.text:SetText(left)
+		if frame.target and frame.target.text then
+			frame.target.text:SetText(right)
+			frame.target:Show()
+		end
+	else
+		frame.text:SetText(left .. " / " .. right)
+		if frame.target then
+			frame.target:Hide()
+		end
+	end
 	frame:Show()
 end
 
@@ -5523,19 +6831,31 @@ function LockRemindersSetSpeedMove(on)
 	if not frame then
 		return
 	end
-	frame:SetAlpha(1)
-	if LockRemindersMisc.speedMoving then
-		frame:Show()
-		frame:EnableMouse(true)
-		frame.hint:Show()
-		frame:SetBackdropColor(0.08, 0.05, 0.12, 0.75)
-		frame:SetBackdropBorderColor(0.7, 0.55, 0.95, 0.95)
-	else
-		frame:EnableMouse(false)
-		frame.hint:Hide()
-		frame:SetBackdropColor(0, 0, 0, 0)
-		frame:SetBackdropBorderColor(0, 0, 0, 0)
+	local function chrome(box, on)
+		if not box then
+			return
+		end
+		box:SetAlpha(1)
+		if on then
+			box:Show()
+			box:EnableMouse(true)
+			box.hint:Show()
+			box:SetBackdropColor(0.08, 0.05, 0.12, 0.75)
+			box:SetBackdropBorderColor(0.7, 0.55, 0.95, 0.95)
+		else
+			box:EnableMouse(false)
+			box.hint:Hide()
+			box:SetBackdropColor(0, 0, 0, 0)
+			box:SetBackdropBorderColor(0, 0, 0, 0)
+		end
 	end
+	local moving = LockRemindersMisc.speedMoving
+	local split = db.speedSplit == true
+	if frame.hint then
+		frame.hint:SetText(split and "You" or "Drag")
+	end
+	chrome(frame, moving)
+	chrome(frame.target, moving and split)
 	LockRemindersUpdateSpeed()
 	LockRemindersRefreshMisc()
 end
@@ -5612,6 +6932,12 @@ end
 function LockRemindersStepVitalMotion(frame, elapsed)
 	if not frame or not frame.health or not db then
 		return
+	end
+	if frame:IsShown() and not (frame.fade and frame.fade:IsPlaying()) then
+		frame:SetAlpha(1)
+		if (frame:GetScale() or 1) < 0.85 then
+			frame:SetScale(1)
+		end
 	end
 	local style = db.vitalStyle or "none"
 	local active = frame:IsShown() and not LockRemindersMisc.vitalMoving and (style == "pulse" or style == "shake" or style == "bounce" or style == "flash" or style == "pop")
@@ -5696,7 +7022,7 @@ end
 function LockRemindersAttachPop(frame, shouldStay)
 	local intro = frame:CreateAnimationGroup()
 	local introFade = intro:CreateAnimation("Alpha")
-	introFade:SetFromAlpha(0)
+	introFade:SetFromAlpha(1)
 	introFade:SetToAlpha(1)
 	introFade:SetDuration(0.14)
 	introFade:SetOrder(1)
@@ -5782,12 +7108,10 @@ function LockRemindersSyncVital(healthLow, manaLow, soundId, replay)
 			frame.intro:Stop()
 		end
 		frame:SetScale(1)
-		frame:SetAlpha(0)
+		frame:SetAlpha(1)
 		frame:Show()
 		if frame.intro then
 			frame.intro:Play()
-		else
-			frame:SetAlpha(1)
 		end
 	end
 	if soundId and soundId ~= "none" then
@@ -5887,6 +7211,92 @@ function LockRemindersCurveAlpha(kind, percent)
 	return alpha
 end
 
+function LockRemindersSecretLow(kind, percent)
+	percent = tonumber(percent) or 0
+	local function below(value)
+		if value == nil then
+			return nil
+		end
+		if not LockRemindersSecret(value) then
+			value = tonumber(value)
+			if not value then
+				return nil
+			end
+			return value <= percent
+		end
+		if not C_CurveUtil or not C_CurveUtil.EvaluateColorValueFromBoolean then
+			return nil
+		end
+		local ok, bit = pcall(function()
+			return C_CurveUtil.EvaluateColorValueFromBoolean(value <= percent, 1, 0)
+		end)
+		if not ok or bit == nil or LockRemindersSecret(bit) then
+			return nil
+		end
+		if type(bit) == "table" then
+			bit = bit.r or bit[1]
+		end
+		if bit == nil or LockRemindersSecret(bit) then
+			return nil
+		end
+		bit = tonumber(bit)
+		if bit == 1 then
+			return true
+		end
+		if bit == 0 then
+			return false
+		end
+		return nil
+	end
+	if kind == "health" then
+		if UnitHealthPercent and CurveConstants and CurveConstants.ScaleTo100 then
+			local ok, value = pcall(UnitHealthPercent, "player", true, CurveConstants.ScaleTo100)
+			if ok then
+				local low = below(value)
+				if low ~= nil then
+					return low
+				end
+			end
+		end
+		if UnitHealth and UnitHealthMax then
+			local okCurrent, current = pcall(UnitHealth, "player")
+			local okMax, max = pcall(UnitHealthMax, "player")
+			if okCurrent and okMax then
+				local okRatio, ratio = pcall(function()
+					return current / max * 100
+				end)
+				if okRatio then
+					return below(ratio)
+				end
+			end
+		end
+		return nil
+	end
+	local power = (Enum and Enum.PowerType and Enum.PowerType.Mana) or 0
+	if UnitPowerPercent and CurveConstants and CurveConstants.ScaleTo100 then
+		local ok, value = pcall(UnitPowerPercent, "player", power, true, CurveConstants.ScaleTo100)
+		if ok then
+			local low = below(value)
+			if low ~= nil then
+				return low
+			end
+		end
+	end
+	if UnitPower and UnitPowerMax then
+		local okCurrent, current = pcall(UnitPower, "player", power)
+		local okMax, max = pcall(UnitPowerMax, "player", power)
+		if okCurrent and okMax then
+			local okRatio, ratio = pcall(function()
+				return current / max * 100
+			end)
+			if okRatio then
+				return below(ratio)
+			end
+		end
+	end
+	return nil
+end
+
 function LockRemindersCurveFlag(kind, percent)
 	local alpha = LockRemindersCurveAlpha(kind, percent)
 	if alpha == nil or LockRemindersSecret(alpha) then
@@ -5947,12 +7357,6 @@ function LockRemindersMiscTick()
 	local manaPct = tonumber(db.manaPct) or 25
 	local hp = LockRemindersHealthPercent()
 	local mp = LockRemindersManaPercent()
-	if healthOn and hp == nil and LockRemindersCurveFlag("health", healthPct) == false then
-		hp = 100
-	end
-	if manaOn and mp == nil and LockRemindersCurveFlag("mana", manaPct) == false then
-		mp = 100
-	end
 	if hp and hp > 0 then
 		LockRemindersMisc.healthLived = true
 	elseif hp == 0 and not LockRemindersMisc.healthLived then
@@ -5963,62 +7367,85 @@ function LockRemindersMiscTick()
 	elseif mp == 0 and not LockRemindersMisc.manaLived then
 		mp = nil
 	end
-	if healthOn and hp ~= nil and not LockRemindersMisc.healthReady then
+	local healthFlag, manaFlag
+	if healthOn and hp == nil then
+		local line = LockRemindersMisc.healthDown and (healthPct + 3) or healthPct
+		healthFlag = LockRemindersCurveFlag("health", line)
+		if healthFlag == nil then
+			healthFlag = LockRemindersSecretLow("health", line)
+		end
+	end
+	if manaOn and mp == nil then
+		local line = LockRemindersMisc.manaDown and (manaPct + 3) or manaPct
+		manaFlag = LockRemindersCurveFlag("mana", line)
+		if manaFlag == nil then
+			manaFlag = LockRemindersSecretLow("mana", line)
+		end
+	end
+	if healthOn and not LockRemindersMisc.healthReady and (hp ~= nil or healthFlag ~= nil) then
 		LockRemindersMisc.healthReady = true
 		hp = nil
+		healthFlag = nil
 	end
-	if manaOn and mp ~= nil and not LockRemindersMisc.manaReady then
+	if manaOn and not LockRemindersMisc.manaReady and (mp ~= nil or manaFlag ~= nil) then
 		LockRemindersMisc.manaReady = true
 		mp = nil
+		manaFlag = nil
 	end
 	LockRemindersMisc.curveShown = false
-	local healthLow = LockRemindersMisc.healthDown
-	local manaLow = LockRemindersMisc.manaDown
+	local healthLow = false
+	local manaLow = false
 	local sound
-	if not healthOn then
-		healthLow = false
-		LockRemindersMisc.healthDown = false
-	elseif hp ~= nil then
-		if LockRemindersMisc.healthDown then
-			healthLow = hp <= healthPct + 3
+	if healthOn then
+		if hp ~= nil then
+			if LockRemindersMisc.healthDown then
+				healthLow = hp <= healthPct + 3
+			else
+				healthLow = hp <= healthPct
+			end
+		elseif healthFlag ~= nil then
+			healthLow = healthFlag
 		else
-			healthLow = hp <= healthPct
+			healthLow = LockRemindersMisc.healthDown and true or false
 		end
 		if healthLow and not LockRemindersMisc.healthDown then
 			sound = db.healthSound or "pulse"
 		end
-		LockRemindersMisc.healthDown = healthLow
 	end
-	if not manaOn then
-		manaLow = false
-		LockRemindersMisc.manaDown = false
-	elseif mp ~= nil then
-		if LockRemindersMisc.manaDown then
-			manaLow = mp <= manaPct + 3
-		else
-			manaLow = mp <= manaPct
-		end
-		if manaLow and not LockRemindersMisc.manaDown then
-			if not sound then
-				sound = db.manaSound or "drip"
+	local healthWas = LockRemindersMisc.healthDown
+	local manaWas = LockRemindersMisc.manaDown
+	if manaOn then
+		if mp ~= nil then
+			if LockRemindersMisc.manaDown then
+				manaLow = mp <= manaPct + 3
+			else
+				manaLow = mp <= manaPct
 			end
+		elseif manaFlag ~= nil then
+			manaLow = manaFlag
+		else
+			manaLow = LockRemindersMisc.manaDown and true or false
 		end
-		LockRemindersMisc.manaDown = manaLow
+		if manaLow and not LockRemindersMisc.manaDown and not sound then
+			sound = db.manaSound or "drip"
+		end
 	end
+	local now = GetTime()
+	if (healthLow and not healthWas) or (manaLow and not manaWas) then
+		LockRemindersMisc.vitalUntil = now + LockRemindersVitalHold()
+	end
+	LockRemindersMisc.healthDown = healthLow
+	LockRemindersMisc.manaDown = manaLow
 	if not healthLow and not manaLow then
 		LockRemindersMisc.vitalUntil = nil
 		LockRemindersSyncVital(false, false, nil, false)
 		return
 	end
-	local now = GetTime()
-	if sound then
-		LockRemindersMisc.vitalUntil = now + LockRemindersVitalHold()
-	end
-	if not LockRemindersMisc.vitalUntil or now >= LockRemindersMisc.vitalUntil then
-		LockRemindersSyncVital(false, false, nil, false)
+	if LockRemindersMisc.vitalUntil and now < LockRemindersMisc.vitalUntil then
+		LockRemindersSyncVital(healthLow, manaLow, sound, false)
 		return
 	end
-	LockRemindersSyncVital(healthLow, manaLow, sound, false)
+	LockRemindersSyncVital(false, false, nil, false)
 end
 
 function LockRemindersVitalHold()
@@ -6117,6 +7544,7 @@ function LockRemindersRefreshMisc()
 		bar.manaLabelBox:SetText(LockRemindersVitalLabel("mana"))
 		bar.manaLabelBox.quiet = nil
 	end
+	LockRemindersPaintChoiceRow(bar.speedLayout, db.speedSplit and "split" or "together")
 	LockRemindersPaintChoiceRow(bar.effectButtons, db.vitalStyle or "none")
 	LockRemindersPaintToggle(bar.speedToggle, db.speedShow ~= false)
 	LockRemindersPaintToggle(bar.healthToggle, db.healthAlert ~= false)
@@ -6496,25 +7924,11 @@ function LockRemindersFunOnTarget()
 	if not LockRemindersFunMatches(token, faction) then
 		return
 	end
-	local guid
-	if UnitGUID then
-		local ok, value = pcall(UnitGUID, "target")
-		if ok and type(value) == "string" and value ~= "" and not LockRemindersSecret(value) then
-			guid = value
-		end
-	end
 	local now = GetTime()
-	LockRemindersFun.seen = LockRemindersFun.seen or {}
-	if guid and LockRemindersFun.seen[guid] and now - LockRemindersFun.seen[guid] < 30 then
-		return
-	end
-	if LockRemindersFun.last and now - LockRemindersFun.last < 1.2 then
+	if LockRemindersFun.last and now - LockRemindersFun.last < 0.3 then
 		return
 	end
 	LockRemindersFunPlay(false)
-	if guid then
-		LockRemindersFun.seen[guid] = GetTime()
-	end
 end
 
 function LockRemindersRefreshFun()
@@ -6658,7 +8072,7 @@ function LockRemindersBuildMisc(owner)
 	end
 
 	LockRemindersSettingsHead(bar, "Movement")
-	local speed = LockRemindersSettingsCard(bar, 50, "Interface\\Icons\\Ability_Rogue_Sprint", "Speed", "You / target")
+	local speed = LockRemindersSettingsCard(bar, 82, "Interface\\Icons\\Ability_Rogue_Sprint", "Speed", "You / target")
 	bar.speedToggle = toggle(speed, "speedShow", 176, -14)
 	local speedSizeLabel = LockRemindersSettingsCaption(speed, bar.speedToggle, "Size", 12)
 	local speedPlus
@@ -6673,6 +8087,28 @@ function LockRemindersBuildMisc(owner)
 		LockRemindersSetSpeedMove(not LockRemindersMisc.speedMoving)
 		LockRemindersRefreshMisc()
 	end)
+	local together = CreateFrame("Button", nil, speed, "BackdropTemplate")
+	together:SetSize(84, 22)
+	together:SetPoint("TOPLEFT", 176, -50)
+	together.choiceId = "together"
+	together.label = together:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	together.label:SetPoint("CENTER")
+	together.label:SetText("Together")
+	local split = CreateFrame("Button", nil, speed, "BackdropTemplate")
+	split:SetSize(72, 22)
+	split:SetPoint("LEFT", together, "RIGHT", 8, 0)
+	split.choiceId = "split"
+	split.label = split:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	split.label:SetPoint("CENTER")
+	split.label:SetText("Split")
+	local function pickLayout(self)
+		db.speedSplit = self.choiceId == "split"
+		LockRemindersApplySpeedLook()
+		LockRemindersSetSpeedMove(LockRemindersMisc.speedMoving)
+	end
+	together:SetScript("OnClick", pickLayout)
+	split:SetScript("OnClick", pickLayout)
+	bar.speedLayout = { together, split }
 
 	LockRemindersSettingsHead(bar, "Alerts")
 	local health = LockRemindersSettingsCard(bar, 136, "Interface\\Icons\\INV_Potion_54", "Low health", "You")
@@ -6830,9 +8266,44 @@ function CreateMiscAlerts()
 	speed.hint:SetTextColor(0.85, 0.75, 1)
 	speed.hint:Hide()
 	speed:EnableMouse(false)
+	local target = CreateFrame("Frame", "LockRemindersSpeedTarget", UIParent, "BackdropTemplate")
+	target:SetFrameStrata("HIGH")
+	target:SetClampedToScreen(true)
+	target:SetMovable(true)
+	target:EnableMouse(true)
+	target:RegisterForDrag("LeftButton")
+	target:SetScript("OnDragStart", function(self)
+		if LockRemindersMisc.speedMoving then
+			self:StartMoving()
+		end
+	end)
+	target:SetScript("OnDragStop", function(self)
+		self:StopMovingOrSizing()
+		LockRemindersSaveNamedPoint(self, "speedTargetPoint")
+	end)
+	target:SetBackdrop(BACKDROP)
+	target:SetBackdropColor(0, 0, 0, 0)
+	target:SetBackdropBorderColor(0, 0, 0, 0)
+	target.text = target:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	target.text:SetPoint("CENTER")
+	target.text:SetJustifyH("CENTER")
+	target.text:SetTextColor(0.7, 0.9, 1)
+	target.text:SetShadowColor(0, 0, 0, 1)
+	target.text:SetShadowOffset(1, -1)
+	target.text:SetText("--")
+	target.hint = target:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	target.hint:SetPoint("TOP", target, "BOTTOM", 0, -2)
+	target.hint:SetText("Target")
+	target.hint:SetTextColor(0.7, 0.9, 1)
+	target.hint:Hide()
+	target:EnableMouse(false)
+	target:Hide()
+	speed.target = target
+	speed.hint:SetText("You")
 	LockRemindersMisc.speed = speed
 	LockRemindersApplySpeedLook()
 	LockRemindersApplyNamedPoint(speed, "speedPoint", { "CENTER", "CENTER", 0, -160 })
+	LockRemindersApplyNamedPoint(target, "speedTargetPoint", { "CENTER", "CENTER", 90, -160 })
 
 	local vital = CreateFrame("Frame", "LockRemindersVital", UIParent, "BackdropTemplate")
 	vital:SetFrameStrata("HIGH")
@@ -7127,9 +8598,19 @@ function LockRemindersNoteCast(unit, first, second, third)
 		for key in pairs(db.missSpells) do
 			local saved = tonumber(key)
 			if saved then
+				local aliases = SpellAliases(saved)
 				for index = 1, #secrets do
 					if LockRemindersSameSpell(secrets[index], saved) then
 						spellID = saved
+						break
+					end
+					for alias = 1, #aliases do
+						if LockRemindersSameSpell(secrets[index], aliases[alias]) then
+							spellID = saved
+							break
+						end
+					end
+					if spellID then
 						break
 					end
 				end
@@ -7145,7 +8626,8 @@ function LockRemindersNoteCast(unit, first, second, third)
 			spellName = named
 		end
 	end
-	if not spellID and (type(spellName) ~= "string" or spellName == "") then
+	local secretID = secrets[1]
+	if not spellID and (type(spellName) ~= "string" or spellName == "") and not secretID then
 		return
 	end
 	local now = GetTime()
@@ -7166,6 +8648,7 @@ function LockRemindersNoteCast(unit, first, second, third)
 	end
 	kept[#kept + 1] = {
 		spellID = spellID,
+		secretID = secretID,
 		name = spellName,
 		kind = unit == "pet" and "pet" or "player",
 		at = now,
@@ -7995,15 +9478,61 @@ function LockRemindersNoteInterrupted(unit)
 	end
 end
 
+function LockRemindersShowRecentMiss(unit, missType)
+	local now = GetTime()
+	local guid = unit and LockRemindersMissGuid(unit) or nil
+	local casts = LockRemindersMiss.casts or {}
+	for index = #casts, 1, -1 do
+		local cast = casts[index]
+		local age = now - (cast.at or 0)
+		if age > 4 then
+			return
+		end
+		local aimed = cast.aoe or not guid or not cast.target or cast.target == guid
+		local saved = missType == "IMMUNE" or LockRemindersMissSpellSaved(cast.spellID or cast.secretID, cast.name)
+		if not cast.used and aimed and saved then
+			cast.used = true
+			local held = LockRemindersMiss.held
+			if held and held.cast == cast then
+				held.cancel = true
+			end
+			LockRemindersShowMissCast(cast, unit, missType)
+			return
+		end
+	end
+end
+
 function LockRemindersHandleUnitCombat(unit, action, flag, amount, school)
-	if not db or LockRemindersSecret(unit) or LockRemindersSecret(action) then
+	if not db then
 		return
 	end
-	if not LockRemindersMissUnit(unit) then
+	if LockRemindersSecret(unit) then
+		unit = nil
+	end
+	if LockRemindersSecret(action) then
+		local names = { "MISS", "MISSED", "RESIST", "RESISTED", "IMMUNE", "WOUND" }
+		local resolved
+		for index = 1, #names do
+			if LockRemindersSecretEquals(action, names[index]) then
+				resolved = names[index]
+				break
+			end
+		end
+		action = resolved
+	end
+	if unit == "player" or unit == "pet" or unit == "vehicle" then
 		return
 	end
 	if LockRemindersSecret(flag) then
-		flag = nil
+		local names = { "MISS", "MISSED", "RESIST", "RESISTED", "IMMUNE", "WOUND" }
+		local resolved
+		for index = 1, #names do
+			if LockRemindersSecretEquals(flag, names[index]) then
+				resolved = names[index]
+				break
+			end
+		end
+		flag = resolved
 	end
 	local rawAmount = amount
 	local amountSecret = LockRemindersSecret(amount)
@@ -8016,26 +9545,24 @@ function LockRemindersHandleUnitCombat(unit, action, flag, amount, school)
 			amount = 1
 		end
 	end
-	local schoolMagic = false
 	if LockRemindersSecret(school) then
-		local physical = LockRemindersSecretEquals(school, 1)
-		if physical == true then
-			school = 1
-		else
-			school = nil
-			schoolMagic = physical == false
-		end
+		school = nil
 	else
 		school = tonumber(school)
 		if school == 0 then
 			school = nil
 		end
-		schoolMagic = school ~= nil and school ~= 1
 	end
 	action = type(action) == "string" and action:upper() or nil
 	flag = type(flag) == "string" and flag:upper() or nil
+	if not action and (flag == "MISS" or flag == "MISSED" or flag == "RESIST" or flag == "RESISTED" or flag == "IMMUNE") then
+		action = flag
+	end
 	if not amountSecret then
 		amount = tonumber(amount)
+	end
+	if not action and amount == 0 and school ~= 1 then
+		action = flag == "RESIST" and "RESIST" or "MISS"
 	end
 	if not LockRemindersMissFlags then
 		LockRemindersMissFlags = {
@@ -8050,7 +9577,9 @@ function LockRemindersHandleUnitCombat(unit, action, flag, amount, school)
 	-- from a swing can be blamed on it.
 	local immuneEvent = action == "IMMUNE" or flag == "IMMUNE"
 	if immuneEvent and school ~= 1 and (action ~= "WOUND" or amount == 0 or amount == nil) then
-		LockRemindersShowImmune(unit)
+		if db.immuneAlert ~= false then
+			LockRemindersShowRecentMiss(unit, "IMMUNE")
+		end
 		return
 	end
 	local woundMiss = false
@@ -8079,52 +9608,7 @@ function LockRemindersHandleUnitCombat(unit, action, flag, amount, school)
 	if not missType or school == 1 then
 		return
 	end
-	local cast = LockRemindersTakeMissCast(unit, school, woundMiss, schoolMagic)
-	if not cast then
-		return
-	end
-	local now = GetTime()
-	local guid = LockRemindersMissGuid(unit)
-	LockRemindersMiss.missAt = now
-	LockRemindersMiss.missGuid = guid
-	if not cast.interrupt and not cast.aura and LockRemindersMiss.hitAt and LockRemindersMiss.hitAt + 0.05 >= (cast.at or 0) and LockRemindersMissSame(LockRemindersMiss.hitUnit, unit, LockRemindersMiss.hitGuid, guid) and math.abs(now - LockRemindersMiss.hitAt) <= (cast.travel and 2.4 or 0.55) then
-		cast.used = nil
-		cast.landed = true
-		return
-	end
-	if cast.landed then
-		return
-	end
-	local freshOnly = (now - (cast.at or now)) <= 0.45
-	LockRemindersMiss.held = { unit = unit, guid = guid, at = now, interrupt = cast.interrupt, aura = cast.aura, freshOnly = freshOnly, woundMiss = woundMiss, cast = cast }
-	local held = LockRemindersMiss.held
-	if C_Timer and C_Timer.After then
-		C_Timer.After(LockRemindersMissDelay(cast, now), function()
-			if held.cancel or cast.landed then
-				return
-			end
-			if not cast.interrupt and not cast.aura and LockRemindersMiss.hitAt and LockRemindersMiss.hitAt + 0.05 >= (cast.at or 0) and LockRemindersMissSame(LockRemindersMiss.hitUnit, unit, LockRemindersMiss.hitGuid, guid) and math.abs(LockRemindersMiss.hitAt - held.at) <= (cast.travel and 2.4 or 0.55) then
-				return
-			end
-			if LockRemindersCastIsDot(cast) then
-				if LockRemindersUnitHasSpell(unit, cast.spellID, cast.name, cast.at, true) then
-					return
-				end
-			elseif LockRemindersUnitHasSpell(unit, cast.spellID, cast.name, cast.at, true) then
-				return
-			end
-			LockRemindersShowMissCast(cast, unit, missType)
-		end)
-		return
-	end
-	if LockRemindersCastIsDot(cast) then
-		if LockRemindersUnitHasSpell(unit, cast.spellID, cast.name, cast.at, true) then
-			return
-		end
-	elseif LockRemindersUnitHasSpell(unit, cast.spellID, cast.name, cast.at, true) then
-		return
-	end
-	LockRemindersShowMissCast(cast, unit, missType)
+	LockRemindersShowRecentMiss(unit, missType)
 end
 
 function LockRemindersTakeImmuneCast(unit)
@@ -8192,6 +9676,234 @@ function LockRemindersShowMissCast(cast, unit, missType)
 	LockRemindersMiss.lastKey = key
 	LockRemindersMiss.lastAt = now
 	ShowSpellMiss(cast.spellID, cast.name, cast.spellID and SpellIcon(cast.spellID) or 136235, cast.kind, missType, destName)
+end
+
+function LockRemindersPlainChat(text)
+	if type(text) ~= "string" or text == "" or LockRemindersSecret(text) then
+		return nil
+	end
+	text = text:gsub("|c%x%x%x%x%x%x%x%x", "")
+	text = text:gsub("|r", "")
+	text = text:gsub("|H.-|h(.-)|h", "%1")
+	text = text:gsub("|T.-|t", "")
+	return text
+end
+
+function LockRemindersMissFromLine(text)
+	text = LockRemindersPlainChat(text)
+	if not text then
+		return
+	end
+	local lower = text:lower()
+	if lower:find(" hits ", 1, true) or lower:find(" crits ", 1, true) or lower:find(" heals ", 1, true) or lower:find(" healed ", 1, true) then
+		return
+	end
+	local function cleanDest(dest)
+		if type(dest) ~= "string" then
+			return nil
+		end
+		dest = dest:gsub("%s*%b()", "")
+		dest = dest:gsub("%.%s*$", "")
+		dest = dest:gsub("^%s+", ""):gsub("%s+$", "")
+		if dest == "" then
+			return nil
+		end
+		return dest
+	end
+	local function cleanSpell(spell)
+		if type(spell) ~= "string" then
+			return nil
+		end
+		local owned = spell:match("^.+'s%s+(.+)$")
+		if owned then
+			spell = owned
+		end
+		spell = spell:gsub("%s*%([Rr]ank %d+%)", "")
+		spell = spell:gsub("%s+[Rr]ank %d+", "")
+		spell = spell:gsub("[%[%]]", "")
+		spell = spell:gsub("^%s+", ""):gsub("%s+$", "")
+		if spell == "" then
+			return nil
+		end
+		return spell, owned and "pet" or nil
+	end
+	local yourAt = text:find("Your ", 1, true)
+	local slice = yourAt and text:sub(yourAt) or ""
+	local spell, dest = slice:match("^Your (.+) Missed (.+)$")
+	if not spell then
+		spell, dest = slice:match("^Your (.+) missed (.+)$")
+	end
+	if not spell then
+		spell, dest = slice:match("^Your (.+) misses (.+)$")
+	end
+	if spell then
+		local name, petKind = cleanSpell(spell)
+		return "MISS", name, cleanDest(dest), petKind or "player"
+	end
+	spell = slice:match("^Your (.+) missed%.?$")
+	if not spell then
+		spell = slice:match("^Your (.+) misses%.?$")
+	end
+	if not spell then
+		spell = slice:match("^Your (.+) Missed%.?$")
+	end
+	if spell then
+		local name, petKind = cleanSpell(spell)
+		return "MISS", name, nil, petKind or "player"
+	end
+	spell, dest = slice:match("^Your (.+) was resisted by (.+)$")
+	if not spell then
+		spell, dest = slice:match("^Your (.+) is resisted by (.+)$")
+	end
+	if not spell then
+		spell, dest = slice:match("^Your (.+) resisted (.+)$")
+	end
+	if not spell then
+		spell, dest = slice:match("^Your (.+) resists (.+)$")
+	end
+	if spell then
+		local name, petKind = cleanSpell(spell)
+		return "RESIST", name, cleanDest(dest), petKind or "player"
+	end
+	spell = slice:match("^Your (.+) was resisted%.?$")
+	if not spell then
+		spell = slice:match("^Your (.+) is resisted%.?$")
+	end
+	if spell then
+		local name, petKind = cleanSpell(spell)
+		return "RESIST", name, nil, petKind or "player"
+	end
+	dest, spell = text:match("^(.-) resisted your (.+)$")
+	if not spell then
+		dest, spell = text:match("^(.-) resists your (.+)$")
+	end
+	if spell then
+		local name = cleanSpell(spell)
+		return "RESIST", name, cleanDest(dest), "player"
+	end
+	dest, spell = text:match("^(.-) is immune to your (.+)$")
+	if not spell then
+		dest, spell = text:match("^(.-) are immune to your (.+)$")
+	end
+	if spell then
+		local name = cleanSpell(spell)
+		return "IMMUNE", name, cleanDest(dest), "player"
+	end
+	local pet
+	if UnitName then
+		local ok, name = pcall(UnitName, "pet")
+		if ok and type(name) == "string" and name ~= "" and not LockRemindersSecret(name) then
+			pet = name
+		end
+	end
+	if not pet then
+		return
+	end
+	local at = text:find(pet .. "'s ", 1, true)
+	if not at then
+		return
+	end
+	local rest = text:sub(at + #pet + 3)
+	spell, dest = rest:match("^(.+) Missed (.+)$")
+	if not spell then
+		spell, dest = rest:match("^(.+) missed (.+)$")
+	end
+	if not spell then
+		spell, dest = rest:match("^(.+) misses (.+)$")
+	end
+	if spell then
+		local name = cleanSpell(spell)
+		return "MISS", name, cleanDest(dest), "pet"
+	end
+	spell, dest = rest:match("^(.+) was resisted by (.+)$")
+	if not spell then
+		spell, dest = rest:match("^(.+) resisted (.+)$")
+	end
+	if spell then
+		local name = cleanSpell(spell)
+		return "RESIST", name, cleanDest(dest), "pet"
+	end
+end
+
+function LockRemindersReadMissLine(text)
+	if not db then
+		return
+	end
+	local missType, spell, dest, kind = LockRemindersMissFromLine(text)
+	if not missType or not spell then
+		return
+	end
+	if missType == "IMMUNE" then
+		if db.immuneAlert == false then
+			return
+		end
+	elseif not LockRemindersMissSpellSaved(nil, spell) then
+		return
+	end
+	local spellID, icon
+	local wanted = Normalize(spell)
+	if type(db.missNames) == "table" then
+		for key, name in pairs(db.missNames) do
+			if Normalize(name or "") == wanted then
+				spellID = tonumber(key)
+				icon = SpellIcon(spellID)
+				break
+			end
+		end
+	end
+	if not spellID and type(db.missSpells) == "table" then
+		for key in pairs(db.missSpells) do
+			if Normalize(SpellName(key) or "") == wanted then
+				spellID = tonumber(key)
+				icon = SpellIcon(spellID)
+				break
+			end
+		end
+	end
+	local casts = LockRemindersMiss.casts or {}
+	for index = 1, #casts do
+		local cast = casts[index]
+		if type(cast.name) == "string" and Normalize(cast.name) == wanted then
+			cast.used = true
+			local held = LockRemindersMiss.held
+			if held and held.cast == cast then
+				held.cancel = true
+			end
+		end
+	end
+	ShowSpellMiss(spellID, spell, icon or 136235, kind, missType, dest)
+end
+
+function LockRemindersWatchMissChat()
+	if not hooksecurefunc then
+		return
+	end
+	LockRemindersMissWrapped = LockRemindersMissWrapped or {}
+	local function wrap(frame, method)
+		local current = frame and frame[method]
+		if type(current) ~= "function" or LockRemindersMissWrapped[current] then
+			return
+		end
+		LockRemindersMissWrapped[current] = true
+		hooksecurefunc(frame, method, function(_, message)
+			pcall(LockRemindersReadMissLine, message)
+		end)
+		if frame[method] then
+			LockRemindersMissWrapped[frame[method]] = true
+		end
+	end
+	if not LockRemindersMissChatMixin and ChatFrameMixin and ChatFrameMixin.AddMessage then
+		LockRemindersMissChatMixin = true
+		hooksecurefunc(ChatFrameMixin, "AddMessage", function(_, message)
+			pcall(LockRemindersReadMissLine, message)
+		end)
+	end
+	local windows = NUM_CHAT_WINDOWS or 10
+	for index = 1, windows do
+		local frame = _G["ChatFrame" .. index]
+		wrap(frame, "AddMessage")
+		wrap(frame, "OldAddMessage")
+	end
 end
 
 function LockRemindersNow()
@@ -8858,9 +10570,13 @@ function LockRemindersApplySoulLook()
 		size = 96
 	end
 	db.soulSize = size
-	frame:SetSize(math.max(size + 24, math.floor(size * 2.4)), size + 30)
 	frame.icon:SetSize(size - 4, size - 4)
-	frame.glow:SetSize(size * 1.7, size * 1.7)
+	LockRemindersFitEvenGlow(frame.glow, frame.icon, size - 4, "soulGlowSize")
+	LockRemindersTintEvenGlow(frame.glow, LockRemindersReadGlow("soulGlow", 0.72, 0.4, 1))
+	local label = LockRemindersClassLabel("soulLabel", false)
+	frame.label:SetText(label)
+	frame.label:SetShown(label ~= "")
+	frame:SetSize(math.max(size + 24, math.floor(size * 2.4)), size + (label ~= "" and 30 or 8))
 	local font = frame.label:GetFont()
 	if type(font) ~= "string" or font == "" then
 		font = "Fonts\\FRIZQT__.TTF"
@@ -9192,9 +10908,14 @@ function LockRemindersRefreshSoul()
 	if bar.shardSize then
 		bar.shardSize:SetText(tostring(tonumber(db.shardSize) or 40))
 	end
+	if bar.soulLabel and bar.soulLabel.SetText and not bar.soulLabel:HasFocus() then
+		bar.soulLabel.quiet = true
+		bar.soulLabel:SetText(LockRemindersClassLabel("soulLabel", false))
+		bar.soulLabel.quiet = nil
+	end
 	if bar.banishLabel and bar.banishLabel.SetText and not bar.banishLabel:HasFocus() then
 		bar.banishLabel.quiet = true
-		bar.banishLabel:SetText(LockRemindersClassLabel("banishLabel", "BANISH"))
+		bar.banishLabel:SetText(LockRemindersClassLabel("banishLabel", false))
 		bar.banishLabel.quiet = nil
 	end
 	if bar.shardLabel and bar.shardLabel.SetText and not bar.shardLabel:HasFocus() then
@@ -9207,6 +10928,12 @@ function LockRemindersRefreshSoul()
 	end
 	if bar.shardMove and bar.shardMove.label then
 		bar.shardMove.label:SetText(LockRemindersWarlock.shardMoving and "Done" or "Move")
+	end
+	if bar.shardGlow then
+		LockRemindersPaintShardGlow(bar.shardGlow)
+	end
+	if bar.shardCount then
+		LockRemindersPaintShardCount(bar.shardCount)
 	end
 	if bar.refreshSound then
 		bar.refreshSound()
@@ -9338,7 +11065,7 @@ function LockRemindersBuildSoul(owner)
 	end
 
 	LockRemindersSettingsHead(bar, "Soulstone")
-	local missing = LockRemindersSettingsCard(bar, 112, LockRemindersSoulIcon(), "Missing stone", "No stone")
+	local missing = LockRemindersSettingsCard(bar, 146, LockRemindersSoulIcon(), "Missing stone", "No stone")
 	bar.alertToggle = toggle(missing, "soulAlert", 176, -14)
 	bar.alertChecks = LockRemindersMakeScopeChecks(missing, bar.alertToggle, "soulScope")
 	local sizeLabel = LockRemindersSettingsCaption(missing, bar.alertChecks.always.caption, "Size", 12)
@@ -9356,14 +11083,23 @@ function LockRemindersBuildSoul(owner)
 	bar.testButton = LockRemindersSettingsButton(missing, bar.moveButton, "Test", 8, function()
 		LockRemindersPreviewSoul()
 	end)
-	bar.refreshSound = LockRemindersMakeSoundRow(missing, -56, function()
+	local soulTextLabel = missing:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	soulTextLabel:SetPoint("TOPLEFT", 176, -50)
+	soulTextLabel:SetText("Text")
+	soulTextLabel:SetTextColor(0.9, 0.84, 1)
+	bar.soulLabel = LockRemindersSettingsEdit(missing, soulTextLabel, "soulLabel", "SOULSTONE", 140, function()
+		LockRemindersApplySoulLook()
+	end, true)
+	bar.soulGlow = LockRemindersGlowSwatch(missing, bar.soulLabel, 12, "soulGlow", 0.72, 0.4, 1, LockRemindersApplySoulLook)
+	LockRemindersGlowBorderControl(missing, bar.soulGlow, 10, "soulGlowSize", LockRemindersApplySoulLook)
+	bar.refreshSound = LockRemindersMakeSoundRow(missing, -84, function()
 		return db and db.soulSound or "chime"
 	end, function(id)
 		db.soulSound = id
 	end)
 
-	LockRemindersSettingsHead(bar, "Tracker")
-	local track = LockRemindersSettingsCard(bar, 82, "Interface\\Icons\\INV_Misc_GroupNeedMore", "On screen", "Active stones")
+	LockRemindersSettingsHead(bar, "SS tracker")
+	local track = LockRemindersSettingsCard(bar, 82, LockRemindersSoulIcon(), "On screen", "Active stones")
 	bar.trackToggle = toggle(track, "soulTrack", 176, -14)
 	bar.trackChecks = LockRemindersMakeScopeChecks(track, bar.trackToggle, "soulTrackScope")
 	local trackSizeLabel = LockRemindersSettingsCaption(track, bar.trackChecks.always.caption, "Size", 12)
@@ -9391,7 +11127,7 @@ function LockRemindersBuildSoul(owner)
 	bar.trackFrame = checkBox(track, 280, -50, "Frame", "soulTrackFrame", LockRemindersApplySoulTrackLook)
 
 	LockRemindersSettingsHead(bar, "Banish")
-	local banish = LockRemindersSettingsCard(bar, 82, "Interface\\Icons\\Spell_Shadow_Cripple", "Banish", "Countdown")
+	local banish = LockRemindersSettingsCard(bar, 90, "Interface\\Icons\\Spell_Shadow_Cripple", "Banish", "Countdown")
 	bar.banishToggle = toggle(banish, "banishAlert", 176, -14)
 	bar.banishChecks = LockRemindersMakeScopeChecks(banish, bar.banishToggle, "banishScope")
 	local secondsLabel = LockRemindersSettingsCaption(banish, bar.banishChecks.always.caption, "Seconds", 12)
@@ -9419,7 +11155,7 @@ function LockRemindersBuildSoul(owner)
 	bar.banishLabel = LockRemindersSettingsEdit(banish, banishTextLabel, "banishLabel", "BANISH", 140, function()
 		LockRemindersApplyClassLook()
 		LockRemindersUpdateClassAlerts()
-	end)
+	end, true)
 	bar.banishMove = LockRemindersSettingsButton(banish, bar.banishLabel, "Move", 10, function()
 		LockRemindersCreateClassAlerts()
 		LockRemindersWarlock.banishMoving = not LockRemindersWarlock.banishMoving
@@ -9438,7 +11174,7 @@ function LockRemindersBuildSoul(owner)
 	end)
 
 	LockRemindersSettingsHead(bar, "Soul shards")
-	local shards = LockRemindersSettingsCard(bar, 82, "Interface\\Icons\\INV_Misc_Gem_Amethyst_02", "Soul shards", "In your bags")
+	local shards = LockRemindersSettingsCard(bar, 114, "Interface\\Icons\\INV_Misc_Gem_Amethyst_02", "Soul shards", "In your bags")
 	bar.shardToggle = toggle(shards, "shardShow", 176, -14)
 	bar.shardChecks = LockRemindersMakeScopeChecks(shards, bar.shardToggle, "shardScope")
 	local shardSizeLabel = LockRemindersSettingsCaption(shards, bar.shardChecks.always.caption, "Size", 12)
@@ -9474,6 +11210,27 @@ function LockRemindersBuildSoul(owner)
 		LockRemindersUpdateClassAlerts()
 		LockRemindersRefreshSoul()
 	end)
+	local glowLabel = LockRemindersSettingsCaption(shards, shards, "Glow", 0)
+	glowLabel:ClearAllPoints()
+	glowLabel:SetPoint("TOPLEFT", 176, -78)
+	bar.shardGlow = CreateFrame("Button", nil, shards, "BackdropTemplate")
+	bar.shardGlow:SetSize(22, 22)
+	bar.shardGlow:SetPoint("LEFT", glowLabel, "RIGHT", 12, 0)
+	bar.shardGlow:SetScript("OnClick", function()
+		LockRemindersPickShardGlow()
+	end)
+	local borderPlus = LockRemindersGlowBorderControl(shards, bar.shardGlow, 10, "shardGlowSize", function()
+		LockRemindersApplyClassLook()
+		LockRemindersUpdateClassAlerts()
+	end)
+	local countLabel = LockRemindersSettingsCaption(shards, borderPlus, "Count", 16)
+	bar.shardCount = CreateFrame("Button", nil, shards, "BackdropTemplate")
+	bar.shardCount:SetSize(22, 22)
+	bar.shardCount:SetPoint("LEFT", countLabel, "RIGHT", 8, 0)
+	bar.shardCount:SetScript("OnClick", function()
+		LockRemindersPickShardCount()
+	end)
+	LockRemindersPaintShardCount(bar.shardCount)
 	LockRemindersSettingsFinish(bar)
 end
 
@@ -9697,6 +11454,209 @@ function LockRemindersClassShown(alertField, scopeField)
 	return ScopeActive(db[scopeField] or { always = true })
 end
 
+function LockRemindersShardGlowColor()
+	local color = db and db.shardGlow
+	local red = type(color) == "table" and tonumber(color.r) or nil
+	local green = type(color) == "table" and tonumber(color.g) or nil
+	local blue = type(color) == "table" and tonumber(color.b) or nil
+	if not red or not green or not blue then
+		return 0.64, 0.32, 0.95
+	end
+	return red, green, blue
+end
+
+function LockRemindersPaintShardGlow(button)
+	if not button then
+		return
+	end
+	local red, green, blue = LockRemindersShardGlowColor()
+	Paint(button, red, green, blue, 1, 0.95, 0.9, 1, 1)
+end
+
+function LockRemindersSetShardGlow(red, green, blue)
+	if not db then
+		return
+	end
+	db.shardGlow = { r = red, g = green, b = blue }
+	local panelBar = panel and panel.soulBar
+	if panelBar and panelBar.shardGlow then
+		LockRemindersPaintShardGlow(panelBar.shardGlow)
+	end
+	LockRemindersApplyClassLook()
+	LockRemindersUpdateClassAlerts()
+end
+
+function LockRemindersShardCountColor()
+	local color = db and db.shardCount
+	local red = type(color) == "table" and tonumber(color.r) or nil
+	local green = type(color) == "table" and tonumber(color.g) or nil
+	local blue = type(color) == "table" and tonumber(color.b) or nil
+	if not red or not green or not blue then
+		return 1, 0.97, 0.86
+	end
+	return red, green, blue
+end
+
+function LockRemindersPaintShardCount(button)
+	if not button then
+		return
+	end
+	local red, green, blue = LockRemindersShardCountColor()
+	Paint(button, red, green, blue, 1, 0.95, 0.9, 1, 1)
+end
+
+function LockRemindersSetShardCount(red, green, blue)
+	if not db then
+		return
+	end
+	db.shardCount = { r = red, g = green, b = blue }
+	local panelBar = panel and panel.soulBar
+	if panelBar and panelBar.shardCount then
+		LockRemindersPaintShardCount(panelBar.shardCount)
+	end
+	LockRemindersApplyClassLook()
+	LockRemindersUpdateClassAlerts()
+end
+
+function LockRemindersPickShardCount()
+	if not ColorPickerFrame or not db then
+		return
+	end
+	local red, green, blue = LockRemindersShardCountColor()
+	local previous = { r = red, g = green, b = blue }
+	local function apply(nextRed, nextGreen, nextBlue)
+		if not nextRed then
+			return
+		end
+		LockRemindersSetShardCount(nextRed, nextGreen, nextBlue)
+	end
+	local function read()
+		if ColorPickerFrame.GetColorRGB then
+			return ColorPickerFrame:GetColorRGB()
+		end
+	end
+	if ColorPickerFrame.SetupColorPickerAndShow then
+		ColorPickerFrame:SetupColorPickerAndShow({
+			r = red,
+			g = green,
+			b = blue,
+			hasOpacity = false,
+			swatchFunc = function()
+				apply(read())
+			end,
+			cancelFunc = function()
+				apply(previous.r, previous.g, previous.b)
+			end,
+		})
+		return
+	end
+	ColorPickerFrame.hasOpacity = false
+	ColorPickerFrame.func = function()
+		apply(read())
+	end
+	ColorPickerFrame.cancelFunc = function()
+		apply(previous.r, previous.g, previous.b)
+	end
+	ColorPickerFrame.previousValues = { red, green, blue }
+	if ColorPickerFrame.SetColorRGB then
+		ColorPickerFrame:SetColorRGB(red, green, blue)
+	end
+	ColorPickerFrame:Hide()
+	ColorPickerFrame:Show()
+end
+
+function LockRemindersPickShardGlow()
+	if not ColorPickerFrame or not db then
+		return
+	end
+	local red, green, blue = LockRemindersShardGlowColor()
+	local previous = { r = red, g = green, b = blue }
+	local function apply(nextRed, nextGreen, nextBlue)
+		if not nextRed then
+			return
+		end
+		LockRemindersSetShardGlow(nextRed, nextGreen, nextBlue)
+	end
+	local function read()
+		if ColorPickerFrame.GetColorRGB then
+			return ColorPickerFrame:GetColorRGB()
+		end
+	end
+	if ColorPickerFrame.SetupColorPickerAndShow then
+		ColorPickerFrame:SetupColorPickerAndShow({
+			r = red,
+			g = green,
+			b = blue,
+			hasOpacity = false,
+			swatchFunc = function()
+				apply(read())
+			end,
+			cancelFunc = function()
+				apply(previous.r, previous.g, previous.b)
+			end,
+		})
+		return
+	end
+	ColorPickerFrame.hasOpacity = false
+	ColorPickerFrame.func = function()
+		apply(read())
+	end
+	ColorPickerFrame.cancelFunc = function()
+		apply(previous.r, previous.g, previous.b)
+	end
+	ColorPickerFrame.previousValues = { red, green, blue }
+	if ColorPickerFrame.SetColorRGB then
+		ColorPickerFrame:SetColorRGB(red, green, blue)
+	end
+	ColorPickerFrame:Hide()
+	ColorPickerFrame:Show()
+end
+
+function LockRemindersFitBanishShade(frame)
+	if not frame or not frame.shade or not frame.fadeLeft or not frame.fadeRight then
+		return
+	end
+	local width = frame:GetWidth() or 0
+	if width < 8 then
+		return
+	end
+	local fade = math.floor(width * 0.22)
+	if fade < 24 then
+		fade = 24
+	end
+	if fade * 2 > width - 4 then
+		fade = math.floor(width * 0.3)
+	end
+	local function gradient(texture, fromA, toA)
+		texture:SetTexture("Interface\\Buttons\\WHITE8x8")
+		local painted = false
+		if CreateColor and texture.SetGradient then
+			painted = pcall(texture.SetGradient, texture, "HORIZONTAL", CreateColor(0, 0, 0, fromA), CreateColor(0, 0, 0, toA))
+			if not painted then
+				painted = pcall(texture.SetGradient, texture, "Horizontal", CreateColor(0, 0, 0, fromA), CreateColor(0, 0, 0, toA))
+			end
+		end
+		if not painted then
+			texture:SetVertexColor(0, 0, 0, (fromA + toA) * 0.5)
+		end
+	end
+	frame.fadeLeft:ClearAllPoints()
+	frame.fadeLeft:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
+	frame.fadeLeft:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 0, 0)
+	frame.fadeLeft:SetWidth(fade)
+	gradient(frame.fadeLeft, 0, 0.55)
+	frame.fadeRight:ClearAllPoints()
+	frame.fadeRight:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, 0)
+	frame.fadeRight:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
+	frame.fadeRight:SetWidth(fade)
+	gradient(frame.fadeRight, 0.55, 0)
+	frame.shade:ClearAllPoints()
+	frame.shade:SetPoint("TOPLEFT", frame.fadeLeft, "TOPRIGHT", 0, 0)
+	frame.shade:SetPoint("BOTTOMRIGHT", frame.fadeRight, "BOTTOMLEFT", 0, 0)
+	frame.shade:SetVertexColor(0, 0, 0, 0.55)
+	pcall(frame.SetBackdrop, frame, nil)
+end
+
 function LockRemindersApplyClassLook()
 	local banish = LockRemindersWarlock.banish
 	local shards = LockRemindersWarlock.shards
@@ -9710,16 +11670,39 @@ function LockRemindersApplyClassLook()
 		if db then
 			db.banishSize = size
 		end
+		banish.icon:ClearAllPoints()
+		banish.icon:SetPoint("LEFT", 7, 0)
 		banish.icon:SetSize(size, size)
-		banish.count:SetFont("Fonts\\FRIZQT__.TTF", math.max(12, math.floor(size * 0.42)), "OUTLINE")
-		banish.text:SetFont("Fonts\\FRIZQT__.TTF", math.max(10, math.floor(size * 0.28)), "OUTLINE")
-		banish.sub:SetFont("Fonts\\FRIZQT__.TTF", math.max(9, math.floor(size * 0.22)), "OUTLINE")
-		banish:SetSize(math.max(size + 20, 88), size + math.floor(size * 0.72))
+		banish.icon:SetTexCoord(0, 1, 0, 1)
+		LockRemindersSmoothIcon(banish.icon)
+		if banish.cooldown then
+			banish.cooldown:ClearAllPoints()
+			banish.cooldown:SetPoint("CENTER", banish.icon, "CENTER", 0, 0)
+			banish.cooldown:SetSize(size, size)
+		end
+		local nameSize = math.max(16, math.floor(size * 0.4))
+		local numberSize = math.max(18, math.floor(size * 0.52))
+		local secondsSize = math.max(13, math.floor(size * 0.3))
+		local subSize = math.max(11, math.floor(size * 0.24))
+		banish.text:SetFont("Fonts\\FRIZQT__.TTF", nameSize, "OUTLINE")
+		banish.count:SetFont("Fonts\\FRIZQT__.TTF", numberSize, "OUTLINE")
+		if banish.seconds then
+			banish.seconds:SetFont("Fonts\\FRIZQT__.TTF", secondsSize, "OUTLINE")
+		end
+		banish.sub:SetFont("Fonts\\FRIZQT__.TTF", subSize, "OUTLINE")
 		local icon = SpellIcon(18647)
 		if not icon or icon == 134400 then
 			icon = SpellIcon(710)
 		end
 		banish.icon:SetTexture(icon or "Interface\\Icons\\Spell_Shadow_Cripple")
+		LockRemindersSmoothIcon(banish.icon)
+		if banish.redTop then
+			banish.redTop:Hide()
+		end
+		if banish.redBottom then
+			banish.redBottom:Hide()
+		end
+		pcall(banish.SetBackdrop, banish, nil)
 	end
 	if shards and shards.icon then
 		local size = tonumber(db and db.shardSize) or 40
@@ -9731,10 +11714,11 @@ function LockRemindersApplyClassLook()
 		if db then
 			db.shardSize = size
 		end
-		shards.icon:SetSize(size, size)
+		local thick = LockRemindersPlaceAlertIcon(shards.icon, shards.glow, size, "TOP", "shardGlowSize")
+		LockRemindersTintEvenGlow(shards.glow, LockRemindersShardGlowColor())
 		shards.count:SetFont("Fonts\\FRIZQT__.TTF", math.max(12, math.floor(size * 0.46)), "OUTLINE")
 		shards.text:SetFont("Fonts\\FRIZQT__.TTF", math.max(10, math.floor(size * 0.28)), "OUTLINE")
-		shards:SetSize(math.max(size + 36, 88), size + math.floor(size * 0.5))
+		shards:SetSize(size + thick * 2, size + thick * 2 + math.floor(size * 0.45))
 		shards.icon:SetTexture(ItemIcon(6265) or "Interface\\Icons\\INV_Misc_Gem_Amethyst_02")
 	end
 end
@@ -9758,54 +11742,136 @@ function LockRemindersUpdateClassAlerts()
 				frame:SetBackdropBorderColor(0, 0, 0, 0)
 			end
 		end
-		edge(banish, LockRemindersWarlock.banishMoving)
 		edge(shards, LockRemindersWarlock.shardMoving)
+		pcall(banish.SetBackdrop, banish, nil)
 	else
-		banish:SetBackdropColor(0, 0, 0, 0)
-		banish:SetBackdropBorderColor(0, 0, 0, 0)
+		pcall(banish.SetBackdrop, banish, nil)
 		shards:SetBackdropColor(0, 0, 0, 0)
 		shards:SetBackdropBorderColor(0, 0, 0, 0)
 	end
-	local function paintBanish(seconds, sub)
+	local function paintBanish(seconds, sub, cooldownKey)
 		LockRemindersApplyClassLook()
+		local label = LockRemindersClassLabel("banishLabel", false)
+		banish.text:SetText(label)
+		banish.text:SetShown(label ~= "")
 		banish.count:SetText(tostring(math.max(1, math.ceil(seconds))))
-		banish.text:SetText(LockRemindersClassLabel("banishLabel", "BANISH"))
+		if banish.seconds then
+			local word = SECONDS
+			if type(word) ~= "string" or word == "" then
+				word = "Seconds"
+			end
+			banish.seconds:SetText(word)
+			banish.seconds:Show()
+		end
 		banish.sub:SetText(sub or "")
+		banish.sub:SetShown(sub and sub ~= "")
+		banish.text:ClearAllPoints()
+		banish.count:ClearAllPoints()
+		if banish.seconds then
+			banish.seconds:ClearAllPoints()
+		end
+		banish.sub:ClearAllPoints()
+		if label ~= "" then
+			banish.text:SetPoint("TOPLEFT", banish.icon, "TOPRIGHT", 10, -1)
+			banish.count:SetPoint("TOPLEFT", banish.text, "BOTTOMLEFT", 0, -2)
+		else
+			banish.count:SetPoint("TOPLEFT", banish.icon, "TOPRIGHT", 10, -1)
+		end
+		if banish.seconds then
+			banish.seconds:SetPoint("LEFT", banish.count, "RIGHT", 6, -1)
+		end
+		if banish.sub:IsShown() then
+			banish.sub:SetPoint("TOPLEFT", banish.count, "BOTTOMLEFT", 0, -1)
+		end
+		local nameW = banish.text:IsShown() and banish.text:GetStringWidth() or 0
+		local timeW = banish.count:GetStringWidth()
+		if banish.seconds and banish.seconds:IsShown() then
+			timeW = timeW + 6 + banish.seconds:GetStringWidth()
+		end
+		local subW = banish.sub:IsShown() and banish.sub:GetStringWidth() or 0
+		local textW = math.max(nameW, timeW, subW, 72)
+		local size = banish.icon:GetWidth()
+		if size < 1 then
+			size = tonumber(db.banishSize) or 48
+		end
+		local stack = (banish.text:IsShown() and banish.text:GetStringHeight() + 2 or 0) + banish.count:GetStringHeight()
+		if banish.sub:IsShown() then
+			stack = stack + 2 + banish.sub:GetStringHeight()
+		end
+		banish:SetSize(7 + size + 10 + textW + 14, math.max(size + 14, stack + 16))
+		LockRemindersFitBanishShade(banish)
+		if banish.cooldown then
+			if not cooldownKey then
+				banish.cooldown:Hide()
+				banish.cooldownKey = nil
+			elseif cooldownKey ~= banish.cooldownKey and banish.cooldown.SetCooldown then
+				banish.cooldownKey = cooldownKey
+				banish.cooldown:SetCooldown(GetTime(), math.max(0.2, seconds))
+				banish.cooldown:Show()
+			end
+		end
+		if banish.glow then
+			banish.glow:Hide()
+		end
 		banish:Show()
 	end
 	local function paintShards(count, zero)
 		LockRemindersApplyClassLook()
 		shards.count:SetText(tostring(count))
+		local countRed, countGreen, countBlue = LockRemindersShardCountColor()
+		shards.count:SetTextColor(countRed, countGreen, countBlue)
 		if zero then
-			shards.count:SetTextColor(1, 0.35, 0.25)
 			local label = LockRemindersClassLabel("shardLabel", false)
 			shards.text:SetText(label)
 			shards.text:SetShown(label ~= "")
+			if shards.glow then
+				shards.glow:Show()
+				if shards.glow.ag and not shards.glow.ag:IsPlaying() then
+					shards.glow.ag:Play()
+				end
+			end
 		else
-			shards.count:SetTextColor(1, 0.97, 0.86)
 			shards.text:SetText("")
 			shards.text:Hide()
+			if shards.glow then
+				if shards.glow.ag then
+					shards.glow.ag:Stop()
+				end
+				shards.glow:Hide()
+			end
+		end
+		local iconSize = shards.icon:GetWidth()
+		if iconSize > 0 then
+			local thick = LockRemindersGlowThick(iconSize, "shardGlowSize")
+			shards:SetWidth(iconSize + thick * 2)
+			if zero and shards.text:IsShown() then
+				shards:SetHeight(iconSize + thick * 2 + math.floor(iconSize * 0.45))
+			else
+				shards:SetHeight(iconSize + thick * 2)
+			end
 		end
 		shards:Show()
 	end
 	if LockRemindersWarlock.banishMoving then
 		paintBanish(5, "Drag")
 	elseif LockRemindersWarlock.banishPreview and now < LockRemindersWarlock.banishPreview then
-		paintBanish(LockRemindersWarlock.banishPreview - now, "Target")
+		paintBanish(LockRemindersWarlock.banishPreview - now, "Target", "preview:" .. tostring(math.floor(LockRemindersWarlock.banishPreview)))
 	elseif not LockRemindersClassShown("banishAlert", "banishScope") then
 		banish:Hide()
+		banish.cooldownKey = nil
 	else
 		local left, ends, name, guid = LockRemindersSoonestBanish()
 		local warn = tonumber(db.banishWarn) or 5
 		if left and left <= warn then
-			paintBanish(left, name or "")
 			local key = tostring(guid or name or "banish") .. ":" .. tostring(math.floor(ends or 0))
+			paintBanish(left, name or "", key)
 			if key ~= LockRemindersWarlock.banishKey then
 				LockRemindersWarlock.banishKey = key
 				LockRemindersPlaySoundId(db.soulSound or "chime")
 			end
 		else
 			banish:Hide()
+			banish.cooldownKey = nil
 			if not left then
 				LockRemindersWarlock.banishKey = nil
 			end
@@ -9863,30 +11929,58 @@ function LockRemindersCreateClassAlerts()
 		return frame
 	end
 	local banish = movable("LockRemindersBanish", "banishPoint", "banishMoving")
+	pcall(banish.SetBackdrop, banish, nil)
+	banish.fadeLeft = banish:CreateTexture(nil, "BACKGROUND")
+	banish.fadeLeft:SetTexture("Interface\\Buttons\\WHITE8x8")
+	banish.shade = banish:CreateTexture(nil, "BACKGROUND")
+	banish.shade:SetTexture("Interface\\Buttons\\WHITE8x8")
+	banish.shade:SetVertexColor(0, 0, 0, 0.55)
+	banish.fadeRight = banish:CreateTexture(nil, "BACKGROUND")
+	banish.fadeRight:SetTexture("Interface\\Buttons\\WHITE8x8")
 	banish.icon = banish:CreateTexture(nil, "ARTWORK")
-	banish.icon:SetPoint("TOP", 0, 0)
-	banish.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-	banish.count = banish:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-	banish.count:SetPoint("CENTER", banish.icon, "CENTER", 1, 0)
-	banish.count:SetTextColor(1, 0.95, 0.75)
-	banish.count:SetShadowColor(0, 0, 0, 1)
-	banish.count:SetShadowOffset(1, -1)
-	banish.text = banish:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	banish.text:SetPoint("TOP", banish.icon, "BOTTOM", 0, -2)
-	banish.text:SetTextColor(0.86, 0.72, 1)
+	banish.icon:SetTexCoord(0, 1, 0, 1)
+	LockRemindersSmoothIcon(banish.icon)
+	local cooldownOk, cooldown = pcall(CreateFrame, "Cooldown", nil, banish, "CooldownFrameTemplate")
+	if cooldownOk and cooldown then
+		pcall(cooldown.SetDrawBling, cooldown, false)
+		if cooldown.SetHideCountdownNumbers then
+			pcall(cooldown.SetHideCountdownNumbers, cooldown, true)
+		end
+		if cooldown.SetDrawEdge then
+			pcall(cooldown.SetDrawEdge, cooldown, false)
+		end
+		banish.cooldown = cooldown
+	end
+	banish.text = banish:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+	banish.text:SetJustifyH("LEFT")
+	banish.text:SetTextColor(1, 0.82, 0)
 	banish.text:SetShadowColor(0, 0, 0, 1)
 	banish.text:SetShadowOffset(1, -1)
+	banish.count = banish:CreateFontString(nil, "OVERLAY", "GameFontNormalHuge")
+	banish.count:SetJustifyH("LEFT")
+	banish.count:SetTextColor(1, 0.82, 0)
+	banish.count:SetShadowColor(0, 0, 0, 1)
+	banish.count:SetShadowOffset(1, -1)
+	banish.seconds = banish:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+	banish.seconds:SetJustifyH("LEFT")
+	banish.seconds:SetTextColor(1, 0.82, 0)
+	banish.seconds:SetShadowColor(0, 0, 0, 1)
+	banish.seconds:SetShadowOffset(1, -1)
 	banish.sub = banish:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	banish.sub:SetPoint("TOP", banish.text, "BOTTOM", 0, -1)
-	banish.sub:SetTextColor(0.9, 0.84, 1)
+	banish.sub:SetJustifyH("LEFT")
+	banish.sub:SetTextColor(1, 0.95, 0.8)
 	LockRemindersWarlock.banish = banish
 	local shards = movable("LockRemindersShards", "shardPoint", "shardMoving")
 	shards.icon = shards:CreateTexture(nil, "ARTWORK")
 	shards.icon:SetPoint("TOP", 0, 0)
 	shards.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+	LockRemindersRoundIcon(shards.icon)
+	shards.glow = LockRemindersMakeEvenGlow(shards)
+	LockRemindersTintEvenGlow(shards.glow, LockRemindersShardGlowColor())
+	shards.glow:Hide()
 	shards.count = shards:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
 	shards.count:SetPoint("CENTER", shards.icon, "CENTER", 1, 0)
-	shards.count:SetTextColor(1, 0.97, 0.86)
+	shards.count:SetTextColor(LockRemindersShardCountColor())
 	shards.count:SetShadowColor(0, 0, 0, 1)
 	shards.count:SetShadowOffset(1, -1)
 	shards.text = shards:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -9928,21 +12022,9 @@ function CreateSoulAlerts()
 	frame.icon = frame:CreateTexture(nil, "ARTWORK")
 	frame.icon:SetPoint("TOP", 0, -4)
 	frame.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-	frame.glow = CreateFrame("Frame", nil, frame)
-	frame.glow:SetPoint("CENTER", frame.icon, "CENTER", 0, 0)
-	frame.glow.tex = frame.glow:CreateTexture(nil, "OVERLAY")
-	frame.glow.tex:SetAllPoints()
-	frame.glow.tex:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
-	frame.glow.tex:SetBlendMode("ADD")
-	frame.glow.tex:SetVertexColor(0.72, 0.4, 1)
-	local glow = frame.glow:CreateAnimationGroup()
-	glow:SetLooping("BOUNCE")
-	local alpha = glow:CreateAnimation("Alpha")
-	alpha:SetFromAlpha(0.25)
-	alpha:SetToAlpha(1)
-	alpha:SetDuration(0.45)
-	alpha:SetSmoothing("IN_OUT")
-	frame.glow.ag = glow
+	LockRemindersRoundIcon(frame.icon)
+	frame.glow = LockRemindersMakeEvenGlow(frame)
+	LockRemindersTintEvenGlow(frame.glow, 0.72, 0.4, 1)
 	frame.label = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	frame.label:SetPoint("TOP", frame.icon, "BOTTOM", 0, -2)
 	frame.label:SetText("SOULSTONE")
@@ -10010,14 +12092,14 @@ function CreateFoodAlert()
 	if foodFrame then
 		return
 	end
-	foodFrame = CreateFrame("Frame", "LockRemindersFoodAlert", UIParent)
+	foodFrame = CreateFrame("Frame", "LockRemindersFoodAlert", UIParent, "BackdropTemplate")
 	foodFrame:SetFrameStrata("HIGH")
 	foodFrame:SetClampedToScreen(true)
 	foodFrame:SetMovable(true)
 	foodFrame:EnableMouse(true)
 	foodFrame:RegisterForDrag("LeftButton")
 	foodFrame:SetScript("OnDragStart", function(self)
-		if self.moving then
+		if self.moving or db.foodLocked == false then
 			self:StartMoving()
 		end
 	end)
@@ -10029,21 +12111,30 @@ function CreateFoodAlert()
 	foodFrame.icon:SetPoint("TOPLEFT", 2, -2)
 	foodFrame.icon:SetPoint("BOTTOMRIGHT", -2, 2)
 	foodFrame.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-	foodFrame.glow = CreateFrame("Frame", nil, foodFrame)
-	foodFrame.glow:SetPoint("CENTER")
-	foodFrame.glow.tex = foodFrame.glow:CreateTexture(nil, "OVERLAY")
-	foodFrame.glow.tex:SetAllPoints()
-	foodFrame.glow.tex:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
-	foodFrame.glow.tex:SetBlendMode("ADD")
-	foodFrame.glow.tex:SetVertexColor(1, 0.82, 0.35)
-	local glow = foodFrame.glow:CreateAnimationGroup()
-	glow:SetLooping("BOUNCE")
-	local alpha = glow:CreateAnimation("Alpha")
-	alpha:SetFromAlpha(0.2)
-	alpha:SetToAlpha(1)
-	alpha:SetDuration(0.45)
-	alpha:SetSmoothing("IN_OUT")
-	foodFrame.glow.ag = glow
+	LockRemindersRoundIcon(foodFrame.icon)
+	foodFrame.glow = LockRemindersMakeEvenGlow(foodFrame)
+	LockRemindersTintEvenGlow(foodFrame.glow, 1, 0.82, 0.35)
+	foodFrame.stone = foodFrame:CreateTexture(nil, "ARTWORK")
+	foodFrame.stone:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+	LockRemindersRoundIcon(foodFrame.stone)
+	foodFrame.stone:Hide()
+	foodFrame.stoneGlow = LockRemindersMakeEvenGlow(foodFrame)
+	LockRemindersTintEvenGlow(foodFrame.stoneGlow, 1, 0.82, 0.35)
+	foodFrame.stoneGlow:Hide()
+	foodFrame.count = foodFrame:CreateFontString(nil, "OVERLAY")
+	foodFrame.count:SetPoint("CENTER", foodFrame.icon, "CENTER", 0, 0)
+	foodFrame.count:SetJustifyH("CENTER")
+	foodFrame.count:SetJustifyV("MIDDLE")
+	foodFrame.count:SetTextColor(1, 1, 1)
+	foodFrame.count:Hide()
+	foodFrame.foodHit = CreateFrame("Button", nil, foodFrame)
+	foodFrame.foodHit:SetFrameLevel((foodFrame:GetFrameLevel() or 1) + 6)
+	foodFrame.foodHit:Hide()
+	LockRemindersBindItemDrag(foodFrame.foodHit, foodFrame.icon, foodFrame.glow, "food")
+	foodFrame.stoneHit = CreateFrame("Button", nil, foodFrame)
+	foodFrame.stoneHit:SetFrameLevel((foodFrame:GetFrameLevel() or 1) + 6)
+	foodFrame.stoneHit:Hide()
+	LockRemindersBindItemDrag(foodFrame.stoneHit, foodFrame.stone, foodFrame.stoneGlow, "healthstone")
 	foodFrame.hint = foodFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	foodFrame.hint:SetPoint("TOP", foodFrame, "BOTTOM", 0, -6)
 	foodFrame.hint:SetText("Drag")
@@ -10077,25 +12168,13 @@ function CreateTalentAlert()
 	talentFrame.icon:SetPoint("TOPLEFT", 2, -2)
 	talentFrame.icon:SetPoint("BOTTOMRIGHT", -2, 2)
 	talentFrame.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+	LockRemindersRoundIcon(talentFrame.icon)
 	talentFrame.ornament = talentFrame:CreateTexture(nil, "OVERLAY")
 	talentFrame.ornament:SetPoint("CENTER")
 	talentFrame.ornament:SetBlendMode("ADD")
 	talentFrame.ornament:Hide()
-	talentFrame.glow = CreateFrame("Frame", nil, talentFrame)
-	talentFrame.glow:SetPoint("CENTER")
-	talentFrame.glow.tex = talentFrame.glow:CreateTexture(nil, "OVERLAY")
-	talentFrame.glow.tex:SetAllPoints()
-	talentFrame.glow.tex:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
-	talentFrame.glow.tex:SetBlendMode("ADD")
-	talentFrame.glow.tex:SetVertexColor(1, 0.82, 0.35)
-	local glow = talentFrame.glow:CreateAnimationGroup()
-	glow:SetLooping("BOUNCE")
-	local alpha = glow:CreateAnimation("Alpha")
-	alpha:SetFromAlpha(0.2)
-	alpha:SetToAlpha(1)
-	alpha:SetDuration(0.28)
-	alpha:SetSmoothing("IN_OUT")
-	talentFrame.glow.ag = glow
+	talentFrame.glow = LockRemindersMakeEvenGlow(talentFrame)
+	LockRemindersTintEvenGlow(talentFrame.glow, 1, 0.82, 0.35)
 	talentFrame.burst = CreateFrame("Frame", nil, talentFrame)
 	talentFrame.burst:SetPoint("CENTER")
 	talentFrame.burst.tex = talentFrame.burst:CreateTexture(nil, "OVERLAY")
@@ -10393,6 +12472,8 @@ local function CreatePanel()
 	panel.foodBar.moveButton:SetScript("OnLeave", function(self)
 		self:SetBackdropColor(0.14, 0.1, 0.2, 1)
 	end)
+	panel.foodBar.glow = LockRemindersGlowSwatch(panel.foodBar, panel.foodBar.moveButton, 12, "foodGlow", 1, 0.82, 0.35, ApplyFoodLook)
+	LockRemindersGlowBorderControl(panel.foodBar, panel.foodBar.glow, 10, "foodGlowSize", ApplyFoodLook)
 
 	panel.spellBar = CreateFrame("Frame", nil, panel)
 	panel.spellBar:SetPoint("TOPLEFT", 14, -112)
@@ -10470,8 +12551,10 @@ local function CreatePanel()
 	panel.spellBar.testButton:SetScript("OnLeave", function(self)
 		self:SetBackdropColor(0.14, 0.1, 0.2, 1)
 	end)
+	panel.spellBar.glow = LockRemindersGlowSwatch(panel.spellBar, panel.spellBar.testButton, 12, "missGlow", 1, 0.15, 0.1, ApplySpellMissLook)
+	local missBorder = LockRemindersGlowBorderControl(panel.spellBar, panel.spellBar.glow, 10, "missGlowSize", ApplySpellMissLook)
 	local immuneLabel = panel.spellBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	immuneLabel:SetPoint("LEFT", panel.spellBar.testButton, "RIGHT", 16, 0)
+	immuneLabel:SetPoint("LEFT", missBorder, "RIGHT", 12, 0)
 	immuneLabel:SetText("Immune")
 	immuneLabel:SetTextColor(1, 0.86, 0.35)
 	panel.spellBar.immuneToggle = CreateFrame("Button", nil, panel.spellBar, "BackdropTemplate")
@@ -10617,6 +12700,8 @@ local function CreatePanel()
 	holdPlus:SetScript("OnClick", function()
 		ChangeTalentHold(0.4)
 	end)
+	talentBar.glow = LockRemindersGlowSwatch(talentBar, holdPlus, 16, "talentGlow", 1, 0.82, 0.35, ApplyTalentLook)
+	LockRemindersGlowBorderControl(talentBar, talentBar.glow, 10, "talentGlowSize", ApplyTalentLook)
 
 	talentMoveButton = CreateFrame("Button", nil, talentBar, "BackdropTemplate")
 	talentMoveButton:SetSize(88, 22)
@@ -11120,8 +13205,16 @@ local function Command(message)
 		db.locked = false
 		db.showFrame = false
 		db.iconSize = 40
+		db.iconPad = 8
 		db.columns = 0
 		db.order = {}
+		db.itemOrder = {}
+		db.foodLocked = true
+		db.foodColumns = 0
+		db.foodPad = 8
+		db.foodShowFrame = false
+		db.foodRemind = "count"
+		db.foodScope = {}
 		db.talents = {}
 		db.talentPoint = { "CENTER", "CENTER", 0, 140 }
 		db.talentSize = 72
@@ -11129,6 +13222,7 @@ local function Command(message)
 		db.missPlayer = false
 		db.missPet = false
 		db.missSpells = {}
+		db.missNames = {}
 		db.missPoint = { "CENTER", "CENTER", 0, 260 }
 		db.missSize = 40
 		db.missHold = 2.2
@@ -11139,8 +13233,10 @@ local function Command(message)
 		db.buffRemind = "count"
 		db.funRaces = {}
 		db.speedShow = true
+		db.speedSplit = false
 		db.speedSize = 18
 		db.speedPoint = { "CENTER", "CENTER", 0, -160 }
+		db.speedTargetPoint = { "CENTER", "CENTER", 90, -160 }
 		db.healthAlert = true
 		db.healthPct = 35
 		db.healthSound = "pulse"
@@ -11162,6 +13258,7 @@ local function Command(message)
 		db.soulAlert = true
 		db.soulScope = { always = true, party = false, raid = false }
 		db.soulSize = 48
+		db.soulLabel = "SOULSTONE"
 		db.soulPoint = { "CENTER", "CENTER", 0, 180 }
 		db.soulSound = "chime"
 		db.soulTrack = true
@@ -11179,6 +13276,21 @@ local function Command(message)
 		db.shardShow = true
 		db.shardSize = 40
 		db.shardLabel = "NO SHARDS"
+		db.buffGlow = { r = 1, g = 0.82, b = 0.35 }
+		db.buffGlowSize = 2
+		db.foodGlowSize = 2
+		db.talentGlowSize = 2
+		db.missGlowSize = 2
+		db.soulGlowSize = 2
+		db.banishGlowSize = 2
+		db.shardGlowSize = 2
+		db.foodGlow = { r = 1, g = 0.82, b = 0.35 }
+		db.talentGlow = { r = 1, g = 0.82, b = 0.35 }
+		db.missGlow = { r = 1, g = 0.15, b = 0.1 }
+		db.soulGlow = { r = 0.72, g = 0.4, b = 1 }
+		db.banishGlow = { r = 0.72, g = 0.4, b = 1 }
+		db.shardGlow = { r = 0.64, g = 0.32, b = 0.95 }
+		db.shardCount = { r = 1, g = 0.97, b = 0.86 }
 		db.shardScope = { always = true, party = false, raid = false }
 		db.shardPoint = { "CENTER", "CENTER", -180, -80 }
 		LockRemindersWarlock.banishMoving = false
@@ -11208,6 +13320,9 @@ local function Command(message)
 		if LockRemindersMisc.speed then
 			LockRemindersApplySpeedLook()
 			LockRemindersApplyNamedPoint(LockRemindersMisc.speed, "speedPoint", db.speedPoint)
+			if LockRemindersMisc.speed.target then
+				LockRemindersApplyNamedPoint(LockRemindersMisc.speed.target, "speedTargetPoint", db.speedTargetPoint)
+			end
 			LockRemindersSetSpeedMove(false)
 		end
 		if LockRemindersMisc.vital then
@@ -11266,6 +13381,9 @@ local function InitDB()
 	if type(db.iconSize) ~= "number" then
 		db.iconSize = 40
 	end
+	if type(db.iconPad) ~= "number" then
+		db.iconPad = 8
+	end
 	if type(db.columns) ~= "number" then
 		db.columns = 0
 	end
@@ -11274,6 +13392,27 @@ local function InitDB()
 	end
 	if type(db.order) ~= "table" then
 		db.order = {}
+	end
+	if type(db.itemOrder) ~= "table" then
+		db.itemOrder = {}
+	end
+	if type(db.foodLocked) ~= "boolean" then
+		db.foodLocked = true
+	end
+	if type(db.foodColumns) ~= "number" then
+		db.foodColumns = 0
+	end
+	if type(db.foodPad) ~= "number" then
+		db.foodPad = 8
+	end
+	if type(db.foodShowFrame) ~= "boolean" then
+		db.foodShowFrame = false
+	end
+	if db.foodRemind ~= "count" and db.foodRemind ~= "alert" then
+		db.foodRemind = "count"
+	end
+	if type(db.foodScope) ~= "table" then
+		db.foodScope = {}
 	end
 	if type(db.talents) ~= "table" then
 		db.talents = {}
@@ -11311,6 +13450,9 @@ local function InitDB()
 	if type(db.missSpells) ~= "table" then
 		db.missSpells = {}
 	end
+	if type(db.missNames) ~= "table" then
+		db.missNames = {}
+	end
 	if type(db.missPoint) ~= "table" then
 		db.missPoint = { "CENTER", "CENTER", 0, 260 }
 	end
@@ -11338,11 +13480,17 @@ local function InitDB()
 	if type(db.speedShow) ~= "boolean" then
 		db.speedShow = true
 	end
+	if type(db.speedSplit) ~= "boolean" then
+		db.speedSplit = false
+	end
 	if type(db.speedSize) ~= "number" then
 		db.speedSize = 18
 	end
 	if type(db.speedPoint) ~= "table" then
 		db.speedPoint = { "CENTER", "CENTER", 0, -160 }
+	end
+	if type(db.speedTargetPoint) ~= "table" then
+		db.speedTargetPoint = { "CENTER", "CENTER", 90, -160 }
 	end
 	if type(db.healthAlert) ~= "boolean" then
 		db.healthAlert = true
@@ -11426,6 +13574,9 @@ local function InitDB()
 	if type(db.banishSize) ~= "number" then
 		db.banishSize = 48
 	end
+	if type(db.soulLabel) ~= "string" then
+		db.soulLabel = "SOULSTONE"
+	end
 	if type(db.banishLabel) ~= "string" then
 		db.banishLabel = "BANISH"
 	end
@@ -11444,6 +13595,51 @@ local function InitDB()
 	end
 	if type(db.shardLabel) ~= "string" then
 		db.shardLabel = "NO SHARDS"
+	end
+	if type(db.buffGlow) ~= "table" then
+		db.buffGlow = { r = 1, g = 0.82, b = 0.35 }
+	end
+	if type(db.buffGlowSize) ~= "number" then
+		db.buffGlowSize = 2
+	end
+	if type(db.foodGlowSize) ~= "number" then
+		db.foodGlowSize = 2
+	end
+	if type(db.talentGlowSize) ~= "number" then
+		db.talentGlowSize = 2
+	end
+	if type(db.missGlowSize) ~= "number" then
+		db.missGlowSize = 2
+	end
+	if type(db.soulGlowSize) ~= "number" then
+		db.soulGlowSize = 2
+	end
+	if type(db.banishGlowSize) ~= "number" then
+		db.banishGlowSize = 2
+	end
+	if type(db.shardGlowSize) ~= "number" then
+		db.shardGlowSize = 2
+	end
+	if type(db.foodGlow) ~= "table" then
+		db.foodGlow = { r = 1, g = 0.82, b = 0.35 }
+	end
+	if type(db.talentGlow) ~= "table" then
+		db.talentGlow = { r = 1, g = 0.82, b = 0.35 }
+	end
+	if type(db.missGlow) ~= "table" then
+		db.missGlow = { r = 1, g = 0.15, b = 0.1 }
+	end
+	if type(db.soulGlow) ~= "table" then
+		db.soulGlow = { r = 0.72, g = 0.4, b = 1 }
+	end
+	if type(db.banishGlow) ~= "table" then
+		db.banishGlow = { r = 0.72, g = 0.4, b = 1 }
+	end
+	if type(db.shardGlow) ~= "table" then
+		db.shardGlow = { r = 0.64, g = 0.32, b = 0.95 }
+	end
+	if type(db.shardCount) ~= "table" then
+		db.shardCount = { r = 1, g = 0.97, b = 0.86 }
 	end
 	if type(db.shardScope) == "string" or type(db.shardScope) ~= "table" then
 		local always, party, raid = ScopeFlags(db.shardScope)
@@ -11479,6 +13675,12 @@ pcall(events.RegisterEvent, events, "UNIT_SPELLCAST_INTERRUPTED")
 pcall(events.RegisterEvent, events, "SPELL_ACTIVATION_OVERLAY_SHOW")
 pcall(events.RegisterEvent, events, "UNIT_SPELLCAST_SUCCEEDED")
 pcall(events.RegisterEvent, events, "PLAYER_TARGET_CHANGED")
+pcall(events.RegisterEvent, events, "CHAT_MSG_SPELL_SELF_DAMAGE")
+pcall(events.RegisterEvent, events, "CHAT_MSG_SPELL_PERIODIC_CREATURE_DAMAGE")
+pcall(events.RegisterEvent, events, "CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_DAMAGE")
+pcall(events.RegisterEvent, events, "CHAT_MSG_SPELL_PET_DAMAGE")
+	pcall(events.RegisterEvent, events, "CHAT_MSG_COMBAT_MISC_INFO")
+	pcall(events.RegisterEvent, events, "CHAT_MSG_SPELL_FAILED_LOCALPLAYER")
 if events.RegisterUnitEvent then
 	pcall(events.RegisterUnitEvent, events, "UNIT_SPELLCAST_SUCCEEDED", "player", "pet")
 end
@@ -11656,6 +13858,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
 		CreateTalentAlert()
 		CreateFoodAlert()
 		CreateSpellMissAlert()
+		pcall(LockRemindersCacheMissNames)
 		CreateMiscAlerts()
 		LockRemindersStartMisc()
 		CreateSoulAlerts()
@@ -11669,6 +13872,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
 		return
 	end
 	if event == "PLAYER_TALENT_UPDATE" or event == "SPELLS_CHANGED" or event == "SPELL_DATA_LOAD_RESULT" then
+		pcall(LockRemindersCacheMissNames)
 		InvalidateSpellbook()
 		if UpdateListNow then
 			UpdateListNow()
@@ -11683,7 +13887,31 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
 		pcall(LockRemindersUpdateSpeed)
 		pcall(LockRemindersFunOnTarget)
 	end
+	if type(event) == "string" and event:find("CHAT_MSG_", 1, true) == 1 then
+		pcall(LockRemindersReadMissLine, arg1)
+		return
+	end
 	if event == "PLAYER_ENTERING_WORLD" then
+		if LockRemindersBuffGone then
+			for key in pairs(LockRemindersBuffGone) do
+				LockRemindersBuffGone[key] = nil
+			end
+		end
+		if LockRemindersBuffKnown then
+			for key in pairs(LockRemindersBuffKnown) do
+				LockRemindersBuffKnown[key] = nil
+			end
+		end
+		if LockRemindersBuffUntil then
+			for key in pairs(LockRemindersBuffUntil) do
+				LockRemindersBuffUntil[key] = nil
+			end
+		end
+		if LockRemindersAuraSync then
+			for key in pairs(LockRemindersAuraSync) do
+				LockRemindersAuraSync[key] = nil
+			end
+		end
 		LockRemindersMisc.healthReady = nil
 		LockRemindersMisc.manaReady = nil
 		LockRemindersMisc.healthLived = nil
@@ -11694,7 +13922,16 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
 		LockRemindersMisc.curveShown = false
 		pcall(LockRemindersSyncVital, false, false, nil, false)
 		pcall(LockRemindersRegisterCastUnits)
+		pcall(LockRemindersCacheMissNames)
+		pcall(LockRemindersWatchMissChat)
 		PlaceMinimapButton()
+		C_Timer.After(0.6, function()
+			pcall(Refresh)
+		end)
+		C_Timer.After(2, function()
+			pcall(LockRemindersCacheMissNames)
+			pcall(LockRemindersWatchMissChat)
+		end)
 		C_Timer.After(1, function()
 			pcall(WatchTalents, true)
 		end)
