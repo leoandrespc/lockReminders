@@ -1345,6 +1345,82 @@ function LockRemindersGlowSwatch(parent, anchor, gap, field, red, green, blue, o
 	return button
 end
 
+function LockRemindersPickColor(read, write, onChange)
+	if not ColorPickerFrame or not read or not write then
+		return
+	end
+	local currentRed, currentGreen, currentBlue = read()
+	local previous = { r = currentRed, g = currentGreen, b = currentBlue }
+	local function apply(nextRed, nextGreen, nextBlue)
+		if not nextRed then
+			return
+		end
+		write(nextRed, nextGreen, nextBlue)
+		if onChange then
+			onChange()
+		end
+	end
+	local function sample()
+		if ColorPickerFrame.GetColorRGB then
+			return ColorPickerFrame:GetColorRGB()
+		end
+	end
+	if ColorPickerFrame.SetupColorPickerAndShow then
+		ColorPickerFrame:SetupColorPickerAndShow({
+			r = currentRed,
+			g = currentGreen,
+			b = currentBlue,
+			hasOpacity = false,
+			swatchFunc = function()
+				apply(sample())
+			end,
+			cancelFunc = function()
+				apply(previous.r, previous.g, previous.b)
+			end,
+		})
+		return
+	end
+	ColorPickerFrame.hasOpacity = false
+	ColorPickerFrame.func = function()
+		apply(sample())
+	end
+	ColorPickerFrame.cancelFunc = function()
+		apply(previous.r, previous.g, previous.b)
+	end
+	ColorPickerFrame.previousValues = { currentRed, currentGreen, currentBlue }
+	if ColorPickerFrame.SetColorRGB then
+		ColorPickerFrame:SetColorRGB(currentRed, currentGreen, currentBlue)
+	end
+	ColorPickerFrame:Hide()
+	ColorPickerFrame:Show()
+end
+
+function LockRemindersColorSwatch(parent, anchor, gap, caption, read, write, onChange)
+	local label = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	label:SetPoint("LEFT", anchor, "RIGHT", gap or 12, 0)
+	label:SetText(caption)
+	label:SetTextColor(0.9, 0.84, 1)
+	local button = CreateFrame("Button", nil, parent, "BackdropTemplate")
+	button:SetSize(22, 22)
+	button:SetPoint("LEFT", label, "RIGHT", 8, 0)
+	button.caption = label
+	local function paint()
+		local red, green, blue = read()
+		Paint(button, red, green, blue, 1, 0.95, 0.9, 1, 1)
+	end
+	button.refresh = paint
+	button:SetScript("OnClick", function()
+		LockRemindersPickColor(read, write, function()
+			paint()
+			if onChange then
+				onChange()
+			end
+		end)
+	end)
+	paint()
+	return button
+end
+
 function LockRemindersSmoothIcon(icon)
 	if not icon then
 		return
@@ -1522,6 +1598,9 @@ local function PlaceList(list, missingKeys)
 				row.glow.ag:Stop()
 			end
 			row.glow:Hide()
+			if row.glow.plate then
+				row.glow.plate:Hide()
+			end
 			row.count:SetText(tostring(list[i].left))
 			row.count:SetTextColor(1, 1, 1)
 			row.count:Show()
@@ -1532,9 +1611,17 @@ local function PlaceList(list, missingKeys)
 			row.icon:SetVertexColor(1, 1, 1)
 			row.count:Hide()
 			row.glow:Show()
+			if row.glow.plate then
+				row.glow.plate:Show()
+			end
 		end
 		row:Show()
-		if not row.quiet then
+		if row.quiet then
+			row.glow:Hide()
+			if row.glow.plate then
+				row.glow.plate:Hide()
+			end
+		else
 			PlayGlow(row)
 		end
 	end
@@ -2411,7 +2498,8 @@ local function AddTalent(spellID)
 		Print("Spell " .. spellID .. " does not exist.")
 		return
 	end
-	db.talents[spellID] = { untilEnd = false }
+	db.talents[spellID] = { untilEnd = false, style = "scythes", sound = "none" }
+	LockRemindersSelectedTalent = spellID
 	Print(SpellName(spellID) .. " plays an animation when it activates.")
 	Touch()
 end
@@ -2477,19 +2565,30 @@ local function SpellEntry(spellID, name, icon, sub, kind)
 		end
 	end
 	if kind == "talent" and savedKey then
+		local stored = LockRemindersEnsureTalent(savedKey)
 		local untilEnd = db.talentUntilEnd
 		if untilEnd == nil then
-			untilEnd = type(db.talents[savedKey]) == "table" and db.talents[savedKey].untilEnd
+			untilEnd = stored and stored.untilEnd
 		end
 		entry.extraLabel = untilEnd and "Until end" or "Seconds"
-		entry.sub = untilEnd and "Stays until the buff ends" or "Plays for the chosen seconds"
+		entry.sub = LockRemindersLookLabel(stored and stored.style) .. " · " .. LockRemindersSoundLabel(stored and stored.sound)
+		entry.select = function()
+			LockRemindersSelectedTalent = savedKey
+			if talentBar and talentBar.refresh then
+				talentBar.refresh()
+			end
+			Touch()
+		end
 		entry.extra = function()
 			local on = not (db.talentUntilEnd and true or false)
 			if db.talentUntilEnd == nil then
-				on = not (type(db.talents[savedKey]) == "table" and db.talents[savedKey].untilEnd)
+				on = not (stored and stored.untilEnd)
 			end
 			db.talentUntilEnd = on and true or false
-			db.talents[savedKey] = { untilEnd = db.talentUntilEnd }
+			stored = LockRemindersEnsureTalent(savedKey)
+			if stored then
+				stored.untilEnd = db.talentUntilEnd and true or false
+			end
 			Print(db.talentUntilEnd and "The alert stays until the buff ends." or "The alert lasts for the chosen seconds.")
 			Touch()
 		end
@@ -3692,7 +3791,9 @@ local function AcquireRow()
 		GameTooltip:Hide()
 	end)
 	row.hit:SetScript("OnClick", function()
-		if row.entry and row.entry.action then
+		if row.entry and row.entry.select then
+			row.entry.select()
+		elseif row.entry and row.entry.action then
 			row.entry.action()
 		end
 	end)
@@ -3712,6 +3813,11 @@ local function FillRow(row, entry)
 	row.spellID = entry.spellID
 	row.itemID = entry.itemID
 	row.icon:SetTexture(entry.icon or 134400)
+	if entry.select and entry.spellID == LockRemindersEditedTalent() then
+		Paint(row, 0.22, 0.16, 0.32, 1, 0.95, 0.78, 0.35, 1)
+	else
+		Paint(row, 1, 1, 1, 0.035, 1, 1, 1, 0.04)
+	end
 	row.name:SetText(entry.name or "")
 	row.sub:SetText(entry.sub or "")
 	row.extra:Hide()
@@ -4448,7 +4554,13 @@ function LockRemindersStyleFoodIcon()
 	if quiet then
 		foodFrame.icon:SetVertexColor(0.55, 0.55, 0.55)
 		if foodFrame.glow then
+			if foodFrame.glow.ag then
+				foodFrame.glow.ag:Stop()
+			end
 			foodFrame.glow:Hide()
+			if foodFrame.glow.plate then
+				foodFrame.glow.plate:Hide()
+			end
 		end
 		if foodFrame.count then
 			local font = foodFrame.count:GetFont()
@@ -5269,7 +5381,7 @@ local function UpdateTalentChrome()
 		scrollBar:SetShown(not hideList)
 	end
 	if talentSizeText and db then
-		talentSizeText:SetText(tostring(tonumber(db.talentSize) or 72))
+		talentSizeText:SetText(tostring(LockRemindersTalentArtSize()))
 	end
 	if talentHoldText and db then
 		talentHoldText:SetText(string.format("%.1f", tonumber(db.talentHold) or 2.2))
@@ -5518,15 +5630,8 @@ local function HookItemLinks()
 	end
 end
 
-local function TalentSize()
-	local size = tonumber(db and db.talentSize) or 72
-	if size < 40 then
-		size = 40
-	end
-	if size > 160 then
-		size = 160
-	end
-	return size
+local function TalentSize(spellID)
+	return LockRemindersTalentArtSize(spellID)
 end
 
 local function TalentHold()
@@ -5614,54 +5719,352 @@ function TalentUntil(spellID)
 	return type(value) == "table" and value.untilEnd and true or false
 end
 
-function PlayAlertSound()
-	local sound = db and db.talentSound or "none"
-	if LockRemindersSoundFiles and LockRemindersSoundFiles[sound] then
-		LockRemindersPlaySoundId(sound)
-		return
+LockRemindersProcLooks = {
+	{ "Icon", "icon" },
+	{ "Scythes", "scythes" },
+	{ "Runeblade", "runeblade" },
+	{ "Storm", "storm" },
+	{ "Water", "water" },
+	{ "Tempest", "tempest" },
+	{ "Rime", "rime" },
+	{ "Pillar", "pillar" },
+	{ "Frostbane", "frostbane" },
+	{ "Razorice", "razor" },
+	{ "Eclipse", "eclipse" },
+	{ "Lunar", "lunar" },
+	{ "Solar", "solar" },
+	{ "Owlkin", "owlkin" },
+	{ "Dagger", "dagger" },
+	{ "Garrote", "garrote" },
+	{ "Artery", "artery" },
+}
+
+LockRemindersProcChoices = {
+	{ "None", "none" },
+}
+
+LockRemindersProcArt = {
+	scythes = {
+		{ "ScytheShadow_L", "BLEND", 0.3, 0, 0, 0, 208, 104, "BOTTOM", 0, 62 },
+		{ "ScytheSpirit_L", "ADD", 1, 0.58, 0.42, 1, 208, 104, "BOTTOM", 0, 62 },
+		{ "ScytheRunes_L", "ADD", 1, 0.82, 0.7, 1, 208, 104, "BOTTOM", 0, 62 },
+		{ "ScytheShadow_R", "BLEND", 0.3, 0, 0, 0, 208, 104, "BOTTOM", 0, 62 },
+		{ "ScytheSpirit_R", "ADD", 1, 0.58, 0.42, 1, 208, 104, "BOTTOM", 0, 62 },
+		{ "ScytheRunes_R", "ADD", 1, 0.82, 0.7, 1, 208, 104, "BOTTOM", 0, 62 },
+	},
+	runeblade = {
+		{ "RunebladeShadow_L", "BLEND", 0.35, 0, 0, 0, 150, 300, "RIGHT", -130, 0 },
+		{ "RunebladeSpirit_L", "ADD", 1, 0.36, 0.72, 1, 150, 300, "RIGHT", -130, 0 },
+		{ "RunebladeRunes_L", "ADD", 1, 0.62, 0.88, 1, 150, 300, "RIGHT", -130, 0 },
+		{ "RunebladeEdge_L", "ADD", 0.9, 0.75, 0.92, 1, 150, 300, "RIGHT", -130, 0 },
+	},
+	storm = {
+		{ "StormArc_L", "ADD", 1, 0.42, 0.4, 1, 150, 300, "RIGHT", -130, 0 },
+		{ "StormBoltsA_L", "ADD", 0.9, 0.72, 0.7, 1, 150, 300, "RIGHT", -130, 0 },
+	},
+	water = {
+		{ "WaveArc_R", "ADD", 1, 0.16, 0.86, 0.9, 150, 300, "LEFT", 130, 0 },
+	},
+	tempest = {
+		{ "GoblinSkull", "ADD", 1, 0.8, 0.86, 1, 130, 130, "CENTER", -100, 20 },
+		{ "GoblinJaw", "ADD", 1, 0.8, 0.86, 1, 130, 130, "CENTER", -100, 20 },
+		{ "GoblinEyes", "ADD", 1, 1, 1, 1, 130, 130, "CENTER", -100, 20 },
+	},
+	rime = {
+		{ "RimeShadow_R", "BLEND", 0.35, 0, 0, 0, 150, 300, "LEFT", 130, 0 },
+		{ "RimeBand_R", "ADD", 1, 0.55, 0.85, 1, 150, 300, "LEFT", 130, 0 },
+		{ "RimeCrystals_R", "ADD", 1, 0.75, 0.95, 1, 150, 300, "LEFT", 130, 0 },
+	},
+	pillar = {
+		{ "PillarShadow", "BLEND", 0.35, 0, 0, 0, 256, 64, "TOP", 0, -80 },
+		{ "PillarCore", "ADD", 1, 0.45, 0.82, 1, 256, 64, "TOP", 0, -80 },
+		{ "PillarFlare", "ADD", 0.85, 0.7, 0.95, 1, 256, 64, "TOP", 0, -80 },
+	},
+	razor = {
+		{ "RazorShadow", "BLEND", 0.35, 0, 0, 0, 84, 84, "CENTER", -110, 10 },
+		{ "RazorLight", "ADD", 1, 0.3, 1, 0.82, 84, 84, "CENTER", -110, 10 },
+		{ "RazorCracks", "ADD", 1, 0.7, 1, 0.92, 84, 84, "CENTER", -110, 10 },
+	},
+	eclipse = {
+		{ "LunarBandA_L", "ADD", 1, 0.62, 0.4, 1, 150, 300, "RIGHT", -130, 0 },
+		{ "MoonDisc", "ADD", 1, 0.62, 0.4, 1, 90, 90, "CENTER", -160, 20 },
+		{ "SolarBandA_R", "ADD", 1, 1, 0.62, 0.14, 150, 300, "LEFT", 130, 0 },
+		{ "SunDisc", "ADD", 1, 1, 0.62, 0.14, 90, 90, "CENTER", 160, 20 },
+	},
+	owlkin = {
+		{ "OwlkinShadow", "BLEND", 0.4, 0, 0, 0, 224, 128, "BOTTOM", 0, 62 },
+		{ "OwlkinWings", "ADD", 1, 0.52, 0.5, 1, 224, 128, "BOTTOM", 0, 62 },
+		{ "OwlkinFace", "ADD", 1, 0.52, 0.5, 1, 224, 128, "BOTTOM", 0, 62 },
+		{ "OwlkinBeak", "ADD", 1, 0.72, 0.7, 1, 224, 128, "BOTTOM", 0, 62 },
+		{ "OwlkinEyes", "ADD", 1, 1, 1, 1, 224, 128, "BOTTOM", 0, 62 },
+	},
+	dagger = {
+		{ "DaggerShadow", "BLEND", 0.4, 0, 0, 0, 256, 64, "TOP", 0, -130 },
+		{ "DaggerBlade", "ADD", 1, 0.75, 0.8, 0.7, 256, 64, "TOP", 0, -130 },
+		{ "DaggerPoison", "ADD", 1, 0.35, 0.85, 0.2, 256, 64, "TOP", 0, -130 },
+	},
+	garrote = {
+		{ "GarroteWire_L", "ADD", 1, 0.55, 0.08, 0.08, 150, 300, "RIGHT", -130, 0 },
+		{ "GarroteBlood_L", "ADD", 0.9, 0.86, 0.06, 0.07, 150, 300, "RIGHT", -130, 0 },
+	},
+	frostbane = {
+		{ "FrostbaneFlameA", "ADD", 0.75, 0.5, 0.86, 1, 104, 104, "CENTER", 135, 0 },
+		{ "FrostbaneFlameB", "ADD", 0.75, 0.5, 0.86, 1, 104, 104, "CENTER", 135, 0 },
+		{ "FrostbaneIce", "ADD", 1, 0.78, 0.96, 1, 104, 104, "CENTER", 135, 0 },
+		{ "FrostbaneShine", "ADD", 0.9, 0.78, 0.96, 1, 104, 104, "CENTER", 135, 0 },
+		{ 135842, "BLEND", 1, 1, 1, 1, 88, 88, "CENTER", 135, -4, "FrostbaneSkullMask" },
+		{ "FrostbaneEye", "ADD", 1, 0.9, 0.98, 1, 28, 28, "CENTER", 128, 10 },
+	},
+	lunar = {
+		{ "Glow_L", "ADD", 0.5, 0.62, 0.4, 1, 150, 300, "RIGHT", -130, 0 },
+		{ "LunarBandA_L", "ADD", 0.85, 0.62, 0.4, 1, 150, 300, "RIGHT", -130, 0 },
+		{ "LunarBandB_L", "ADD", 0.9, 0.62, 0.4, 1, 150, 300, "RIGHT", -130, 0 },
+		{ "MoonDisc", "BLEND", 1, 0.8, 0.9, 1, 96, 96, "CENTER", -239, 0 },
+		{ "BodyGlow", "ADD", 0.45, 0.8, 0.9, 1, 96, 96, "CENTER", -239, 0 },
+		{ "MoonCorona", "ADD", 0.95, 0.62, 0.4, 1, 192, 192, "CENTER", -239, 0 },
+		{ "EclipseShadow", "BLEND", 0.85, 0, 0, 0, 96, 96, "CENTER", -239, 0 },
+	},
+	solar = {
+		{ "Glow_R", "ADD", 0.6, 1, 0.62, 0.14, 150, 300, "LEFT", 130, 0 },
+		{ "SolarBandA_R", "ADD", 0.85, 1, 0.62, 0.14, 150, 300, "LEFT", 130, 0 },
+		{ "SolarBandB_R", "ADD", 0.95, 1, 0.62, 0.14, 150, 300, "LEFT", 130, 0 },
+		{ "SunDisc", "BLEND", 1, 1, 0.9, 0.58, 96, 96, "CENTER", 239, 0 },
+		{ "SunCore", "ADD", 0.42, 1, 1, 1, 96, 96, "CENTER", 239, 0 },
+		{ "SunCorona", "ADD", 1, 1, 0.62, 0.14, 192, 192, "CENTER", 239, 0 },
+		{ "SunFlare", "ADD", 0.85, 1, 1, 1, 64, 64, "CENTER", 253, 26 },
+		{ "EclipseShadow", "BLEND", 0.9, 0, 0, 0, 96, 96, "CENTER", 239, 0 },
+	},
+	artery = {
+		{ "BleedShadow_R", "BLEND", 0.28, 0, 0, 0, 150, 300, "LEFT", 130, 0 },
+		{ "ArteryBranches_R", "BLEND", 0.95, 1, 1, 1, 150, 300, "LEFT", 130, 0 },
+		{ "ArteryBlood_R", "BLEND", 1, 0.96, 0.1, 0.08, 150, 300, "LEFT", 130, 0 },
+		{ "ArteryWall_R", "BLEND", 1, 1, 1, 1, 150, 300, "LEFT", 130, 0 },
+	},
+}
+
+function LockRemindersMapLook(style)
+	if style == "icon" then
+		return "icon"
 	end
-	local kits, legacy, file
-	if sound == "alarm" then
-		kits, legacy, file = { "RAID_WARNING" }, "RaidWarning", "Sound\\Interface\\RaidWarning.ogg"
-	elseif sound == "bell" then
-		kits, legacy, file = { "READY_CHECK" }, "ReadyCheck", "Sound\\Interface\\ReadyCheck.ogg"
-	elseif sound == "level" then
-		kits, legacy, file = { "LEVEL_UP", "LEVELUP" }, "LevelUp", "Sound\\Interface\\LevelUp.ogg"
-	elseif sound == "coin" then
-		kits, legacy, file = { "AUCTION_WINDOW_OPEN" }, "AuctionWindowOpen", "Sound\\Interface\\AuctionWindowOpen.ogg"
-	elseif sound == "ping" then
-		kits, legacy, file = { "MAP_PING" }, "MapPing", "Sound\\Interface\\MapPing.ogg"
-	elseif sound == "tell" then
-		kits, legacy, file = { "TELL_MESSAGE" }, "TellMessage", "Sound\\Interface\\TellMessage.ogg"
-	elseif sound == "invite" then
-		kits, legacy, file = { "IG_PLAYER_INVITE", "IG_PLAYER_INVITE_A" }, "igPlayerInvite", "Sound\\Interface\\iPlayerInviteA.ogg"
-	elseif sound == "clock" then
-		kits, legacy, file = { "ALARM_CLOCK_WARNING_3" }, "AlarmClockWarning3", "Sound\\Interface\\AlarmClockWarning3.ogg"
+	if style == "trivial" then
+		return "storm"
+	end
+	if style == "magic" or style == "decor" then
+		return "scythes"
+	end
+	if style and LockRemindersProcArt[style] then
+		return style
+	end
+	return "scythes"
+end
+
+function LockRemindersLookLabel(style)
+	style = LockRemindersMapLook(style)
+	local looks = LockRemindersProcLooks
+	for index = 1, #looks do
+		if looks[index][2] == style then
+			return looks[index][1]
+		end
+	end
+	return "Scythes"
+end
+
+function LockRemindersSoundLabel(id)
+	local choices = LockRemindersSoundChoices
+	if choices then
+		for index = 1, #choices do
+			if choices[index][2] == id then
+				return choices[index][1]
+			end
+		end
+	end
+	return "None"
+end
+
+function LockRemindersEditedTalent()
+	local key = LockRemindersSelectedTalent
+	if key and db and db.talents and db.talents[key] ~= nil then
+		return key
+	end
+	if db and type(db.talents) == "table" then
+		for saved in pairs(db.talents) do
+			LockRemindersSelectedTalent = saved
+			return saved
+		end
+	end
+	LockRemindersSelectedTalent = nil
+end
+
+function LockRemindersEnsureTalent(spellID)
+	if not db or type(db.talents) ~= "table" or spellID == nil then
+		return nil
+	end
+	local value = db.talents[spellID]
+	if type(value) ~= "table" then
+		value = {}
+		db.talents[spellID] = value
+	end
+	if type(value.style) ~= "string" then
+		value.style = LockRemindersMapLook(db.talentStyle)
 	else
-		return
+		value.style = LockRemindersMapLook(value.style)
 	end
-	local function heard(ok, willPlay)
-		return ok and willPlay ~= false
+	if not LockRemindersKnownSound(value.sound) then
+		value.sound = LockRemindersKnownSound(db.talentSound) and db.talentSound or "none"
 	end
-	if SOUNDKIT then
-		for index = 1, #kits do
-			local id = SOUNDKIT[kits[index]]
-			if type(id) == "number" then
-				if heard(pcall(PlaySound, id, "SFX")) or heard(pcall(PlaySound, id)) then
-					return
+	return value
+end
+
+function LockRemindersTalentArtSize(spellID)
+	if spellID == nil then
+		spellID = (talentFrame and talentFrame.spellID) or LockRemindersEditedTalent()
+	end
+	local value = db and db.talents and spellID and db.talents[spellID]
+	local size = type(value) == "table" and tonumber(value.size) or tonumber(db and db.talentSize) or 72
+	if size < 40 then
+		size = 40
+	end
+	if size > 160 then
+		size = 160
+	end
+	return size
+end
+
+function LockRemindersTalentFade(spellID)
+	if spellID == nil then
+		spellID = (talentFrame and talentFrame.spellID) or LockRemindersEditedTalent()
+	end
+	local value = db and db.talents and spellID and db.talents[spellID]
+	local fade = type(value) == "table" and tonumber(value.fade) or tonumber(db and db.talentFade) or 0.4
+	fade = math.floor(fade * 10 + 0.5) / 10
+	if fade < 0 then
+		fade = 0
+	end
+	if fade > 2 then
+		fade = 2
+	end
+	return fade
+end
+
+function LockRemindersProcPalette(style)
+	local design = LockRemindersProcArt and LockRemindersProcArt[style]
+	local color, accent
+	if design then
+		for index = 1, #design do
+			local red, green, blue = design[index][4], design[index][5], design[index][6]
+			local sum = (red or 0) + (green or 0) + (blue or 0)
+			local white = red and red > 0.97 and green > 0.97 and blue > 0.97
+			if sum > 0.08 and not white then
+				if not color then
+					color = { red, green, blue }
+				elseif not accent then
+					local gap = math.abs(red - color[1]) + math.abs(green - color[2]) + math.abs(blue - color[3])
+					if gap > 0.08 then
+						accent = { red, green, blue }
+					end
 				end
 			end
 		end
 	end
-	if legacy and (heard(pcall(PlaySound, legacy, "SFX")) or heard(pcall(PlaySound, legacy))) then
+	if not color then
+		color = { 1, 0.82, 0.35 }
+	end
+	if not accent then
+		accent = { color[1], color[2], color[3] }
+	end
+	return color, accent
+end
+
+function LockRemindersTalentColor(spellID, which)
+	if spellID == nil then
+		spellID = LockRemindersEditedTalent()
+	end
+	local color, accent = LockRemindersProcPalette(LockRemindersTalentStyle(spellID))
+	local fallback = which == "accent" and accent or color
+	local value = db and db.talents and spellID and db.talents[spellID]
+	local saved = type(value) == "table" and value[which]
+	if type(saved) ~= "table" and db then
+		saved = which == "accent" and db.talentLookAccent or db.talentLookColor
+	end
+	local red = type(saved) == "table" and tonumber(saved.r) or nil
+	local green = type(saved) == "table" and tonumber(saved.g) or nil
+	local blue = type(saved) == "table" and tonumber(saved.b) or nil
+	if not red or not green or not blue then
+		return fallback[1], fallback[2], fallback[3]
+	end
+	return red, green, blue
+end
+
+function LockRemindersFadeTalent(spellID)
+	local seconds = LockRemindersTalentFade(spellID)
+	local ornament = LockRemindersTalentOrnament
+	if seconds <= 0 then
+		LockRemindersHideTalentOrnament()
+		if talentFrame then
+			talentFrame:Hide()
+		end
 		return
 	end
-	if PlaySoundFile and file then
-		if heard(pcall(PlaySoundFile, file, "SFX")) or heard(pcall(PlaySoundFile, file, "Master")) then
-			return
-		end
-		pcall(PlaySoundFile, file:gsub("\\", "/"), "Master")
+	if ornament and ornament:IsShown() then
+		ornament.pulse = false
+		ornament.fading = seconds
+		ornament.fadeAge = 0
+		ornament.fadeFrom = ornament:GetAlpha()
 	end
+	if talentFrame and talentFrame:IsShown() and talentFrame.fadeOut and talentFrame.fade then
+		talentFrame.fadeOut:SetDuration(seconds)
+		talentFrame.fade:Stop()
+		talentFrame.fade:Play()
+	elseif talentFrame and not (ornament and ornament:IsShown()) then
+		talentFrame:Hide()
+	end
+end
+
+function LockRemindersTalentStyle(spellID)
+	if spellID == nil then
+		spellID = LockRemindersEditedTalent()
+	end
+	local value = db and db.talents and spellID and db.talents[spellID]
+	local style = type(value) == "table" and value.style or db and db.talentStyle
+	return LockRemindersMapLook(style)
+end
+
+function LockRemindersTalentSound(spellID)
+	if spellID == nil then
+		spellID = LockRemindersEditedTalent()
+	end
+	local value = db and db.talents and spellID and db.talents[spellID]
+	local sound = type(value) == "table" and value.sound
+	if LockRemindersKnownSound(sound) then
+		return sound
+	end
+	if LockRemindersKnownSound(db and db.talentSound) then
+		return db.talentSound
+	end
+	return "none"
+end
+
+function LockRemindersFillProcChoices()
+	local choices = LockRemindersProcChoices
+	for index = #choices, 1, -1 do
+		choices[index] = nil
+	end
+	if db and type(db.talents) == "table" then
+		for key in pairs(db.talents) do
+			local name = SpellDisplayName(key) or SpellName(key) or tostring(key)
+			choices[#choices + 1] = { name, key }
+		end
+		table.sort(choices, function(left, right)
+			return tostring(left[1]) < tostring(right[1])
+		end)
+	end
+	if #choices == 0 then
+		choices[1] = { "None", "none" }
+	end
+end
+
+function PlayAlertSound(spellID)
+	LockRemindersPlaySoundId(LockRemindersTalentSound(spellID))
 end
 
 function PlayScreenFlash()
@@ -5687,36 +6090,181 @@ function QuietScreenFlash()
 	end
 end
 
+function LockRemindersTalentOnScreen(spellID)
+	if spellID == nil then
+		spellID = talentFrame and talentFrame.spellID or LockRemindersEditedTalent()
+	end
+	return LockRemindersTalentStyle(spellID) == "icon"
+end
+
+function LockRemindersHideTalentOrnament()
+	local frame = LockRemindersTalentOrnament
+	if not frame then
+		return
+	end
+	frame.pulse = false
+	frame.fading = nil
+	frame:SetAlpha(1)
+	frame:Hide()
+end
+
+function LockRemindersShowTalentOrnament(style, spellID)
+	if style == nil or style == "icon" or not LockRemindersProcArt[style] then
+		LockRemindersHideTalentOrnament()
+		return
+	end
+	local frame = LockRemindersTalentOrnament
+	if not frame then
+		frame = CreateFrame("Frame", nil, UIParent)
+		frame:SetSize(640, 480)
+		frame:SetFrameStrata("DIALOG")
+		frame:SetFrameLevel(40)
+		frame.left = frame:CreateTexture(nil, "ARTWORK")
+		frame.right = frame:CreateTexture(nil, "ARTWORK")
+		frame.top = frame:CreateTexture(nil, "ARTWORK")
+		frame.left:SetBlendMode("ADD")
+		frame.right:SetBlendMode("ADD")
+		frame.top:SetBlendMode("ADD")
+		frame:SetScript("OnUpdate", function(self, elapsed)
+			elapsed = elapsed or 0
+			if self.fading then
+				self.fadeAge = (self.fadeAge or 0) + elapsed
+				local span = self.fading
+				if not span or span <= 0 or self.fadeAge >= span then
+					self.fading = nil
+					self.pulse = false
+					self:SetAlpha(1)
+					self:Hide()
+					return
+				end
+				self:SetAlpha((self.fadeFrom or 1) * (1 - self.fadeAge / span))
+				return
+			end
+			if not self.pulse then
+				return
+			end
+			self.age = (self.age or 0) + elapsed
+			self:SetAlpha(0.55 + 0.45 * math.sin(self.age * 4))
+		end)
+		LockRemindersTalentOrnament = frame
+	end
+	if frame:GetParent() ~= UIParent then
+		frame:SetParent(UIParent)
+	end
+	local artX, artY = LockRemindersTalentArtOffset(spellID)
+	frame:ClearAllPoints()
+	frame:SetPoint("CENTER", UIParent, "CENTER", artX, artY)
+	if frame.left then
+		frame.left:Hide()
+	end
+	if frame.right then
+		frame.right:Hide()
+	end
+	if frame.top then
+		frame.top:Hide()
+	end
+	local design = LockRemindersProcArt[style]
+	local scale = TalentSize(spellID) / 72
+	local media = "Interface\\AddOns\\LockReminders\\Textures\\Procs\\"
+	local colorDefault, accentDefault = LockRemindersProcPalette(style)
+	local colorRed, colorGreen, colorBlue = LockRemindersTalentColor(spellID, "color")
+	local accentRed, accentGreen, accentBlue = LockRemindersTalentColor(spellID, "accent")
+	frame.arts = frame.arts or {}
+	for index = 1, #design do
+		local spec = design[index]
+		local tex = frame.arts[index]
+		if not tex then
+			tex = frame:CreateTexture(nil, "ARTWORK", nil, index)
+			frame.arts[index] = tex
+		end
+		local file = spec[1]
+		if type(file) == "number" then
+			tex:SetTexture(file)
+		else
+			tex:SetTexture(media .. file)
+		end
+		if not tex:GetTexture() then
+			tex:Hide()
+		else
+			local red, green, blue = spec[4], spec[5], spec[6]
+			local sum = (red or 0) + (green or 0) + (blue or 0)
+			local white = red > 0.97 and green > 0.97 and blue > 0.97
+			if sum > 0.08 and not white then
+				local gap = math.abs(red - colorDefault[1]) + math.abs(green - colorDefault[2]) + math.abs(blue - colorDefault[3])
+				if gap > 0.08 then
+					red, green, blue = accentRed, accentGreen, accentBlue
+				else
+					red, green, blue = colorRed, colorGreen, colorBlue
+				end
+			end
+			tex:SetBlendMode(spec[2])
+			tex:SetAlpha(spec[3])
+			tex:SetVertexColor(red, green, blue, 1)
+			tex:SetSize(spec[7] * scale, spec[8] * scale)
+			tex:ClearAllPoints()
+			tex:SetPoint(spec[9], frame, "CENTER", spec[10] * scale, spec[11] * scale)
+			tex:SetTexCoord(0, 1, 0, 1)
+			if tex.lookMask and tex.RemoveMaskTexture then
+				tex:RemoveMaskTexture(tex.lookMask)
+				tex.lookMask:Hide()
+				tex.lookMask = nil
+			end
+			if spec[12] and frame.CreateMaskTexture and tex.AddMaskTexture then
+				local ok, mask = pcall(frame.CreateMaskTexture, frame)
+				if ok and mask then
+					mask:SetAllPoints(tex)
+					if not pcall(mask.SetTexture, mask, media .. spec[12], "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE") then
+						mask:SetTexture(media .. spec[12])
+					end
+					pcall(tex.AddMaskTexture, tex, mask)
+					tex.lookMask = mask
+				end
+			end
+			if tex.SetHorizTile then
+				tex:SetHorizTile(false)
+			end
+			if tex.SetVertTile then
+				tex:SetVertTile(false)
+			end
+			tex:Show()
+		end
+	end
+	for index = #design + 1, #frame.arts do
+		frame.arts[index]:Hide()
+	end
+	frame.fading = nil
+	frame.pulse = true
+	frame.age = 0
+	frame:SetAlpha(1)
+	frame:Show()
+end
+
 function ApplyTalentFace(spellID)
 	if not talentFrame then
 		return
 	end
-	local style = db and db.talentStyle or "icon"
-	local size = TalentSize()
+	local style = LockRemindersTalentStyle(spellID)
+	if talentFrame.ornament then
+		talentFrame.ornament:Hide()
+	end
+	if style ~= "icon" then
+		talentFrame.icon:Hide()
+		if talentFrame.glow then
+			talentFrame.glow:Hide()
+			if talentFrame.glow.plate then
+				talentFrame.glow.plate:Hide()
+			end
+		end
+		LockRemindersShowTalentOrnament(style, spellID)
+		return
+	end
+	LockRemindersHideTalentOrnament()
 	talentFrame.icon:SetDrawLayer("OVERLAY", 7)
 	talentFrame.icon:Show()
 	talentFrame.icon:SetTexture(spellID and SpellIcon(spellID) or PreviewTalentIcon())
-	if style == "icon" or not talentFrame.ornament then
-		if talentFrame.ornament then
-			talentFrame.ornament:Hide()
-		end
-		return
+	if talentFrame.glow then
+		talentFrame.glow:Show()
 	end
-	local texture = "Interface\\Buttons\\UI-ActionButton-Border"
-	if style == "star" then
-		texture = "Interface\\Cooldown\\star4"
-	elseif style == "flash" then
-		texture = "Interface\\Cooldown\\Ping4"
-	elseif style == "lozenge" then
-		texture = "Interface\\Cooldown\\Lozenge"
-	elseif style == "glow" then
-		texture = "Interface\\Buttons\\WHITE8x8"
-	end
-	talentFrame.ornament:SetDrawLayer("ARTWORK", 0)
-	talentFrame.ornament:SetTexture(texture)
-	talentFrame.ornament:SetSize(size * 1.8, size * 1.8)
-	talentFrame.ornament:SetVertexColor(1, 0.86, 0.45)
-	talentFrame.ornament:Show()
 end
 
 local function PlayTalent(spellID, preview)
@@ -5729,8 +6277,12 @@ local function PlayTalent(spellID, preview)
 	talentFrame.spellID = spellID
 	talentFrame:SetAlpha(1)
 	talentFrame:SetScale(1)
-	talentFrame:Show()
-	PlayAlertSound()
+	if LockRemindersTalentOnScreen() then
+		talentFrame:Show()
+	else
+		talentFrame:Hide()
+	end
+	PlayAlertSound(spellID)
 	if talentFrame.glow.ag then
 		talentFrame.glow.ag:Stop()
 		talentFrame.glow.ag:Play()
@@ -5761,12 +6313,7 @@ local function PlayTalent(spellID, preview)
 		if not talentFrame or talentMoving then
 			return
 		end
-		if talentFrame.fade then
-			talentFrame.fade:Stop()
-			talentFrame.fade:Play()
-		else
-			talentFrame:Hide()
-		end
+		LockRemindersFadeTalent(talentFrame.spellID)
 	end)
 end
 
@@ -5783,14 +6330,16 @@ function ShowTalentPreview(show)
 		talentFrame.fade:Stop()
 	end
 	talentFrame:SetAlpha(1)
-	if talentMoving then
+	if talentMoving and LockRemindersTalentOnScreen() then
 		ApplyTalentLook()
 		ApplyTalentPoint()
 		ApplyTalentFace()
 		talentFrame:Show()
 		Print("Drag the animation. Press Done when you finish.")
 	else
+		talentMoving = false
 		ApplyTalentLook()
+		LockRemindersHideTalentOrnament()
 		talentFrame:Hide()
 	end
 	if UpdateTalentChrome then
@@ -5799,11 +6348,116 @@ function ShowTalentPreview(show)
 end
 
 function ChangeTalentSize(delta)
-	db.talentSize = TalentSize() + delta
-	db.talentSize = TalentSize()
+	local key = LockRemindersEditedTalent()
+	local entry = key and LockRemindersEnsureTalent(key)
+	local size = LockRemindersTalentArtSize(key) + delta
+	if size < 40 then
+		size = 40
+	end
+	if size > 160 then
+		size = 160
+	end
+	if entry then
+		entry.size = size
+	else
+		db.talentSize = size
+	end
 	ApplyTalentLook()
-	if talentMoving and talentFrame then
+	local style = LockRemindersTalentStyle(key)
+	if style ~= "icon" then
+		LockRemindersShowTalentOrnament(style, key)
+	elseif talentMoving and talentFrame then
 		talentFrame:Show()
+	end
+	if UpdateTalentChrome then
+		UpdateTalentChrome()
+	end
+end
+
+function LockRemindersTalentArtOffset(spellID)
+	if spellID == nil then
+		spellID = (talentFrame and talentFrame.spellID) or LockRemindersEditedTalent()
+	end
+	local value = db and db.talents and spellID and db.talents[spellID]
+	local x = type(value) == "table" and tonumber(value.x) or tonumber(db and db.talentArtX) or 0
+	local y = type(value) == "table" and tonumber(value.y) or tonumber(db and db.talentArtY) or 0
+	if x < -400 then
+		x = -400
+	end
+	if x > 400 then
+		x = 400
+	end
+	if y < -400 then
+		y = -400
+	end
+	if y > 400 then
+		y = 400
+	end
+	return x, y
+end
+
+function ChangeTalentPlace(axis, delta)
+	local key = LockRemindersEditedTalent()
+	local entry = key and LockRemindersEnsureTalent(key)
+	local x, y = LockRemindersTalentArtOffset(key)
+	if axis == "x" then
+		x = x + delta
+	else
+		y = y + delta
+	end
+	if x < -400 then
+		x = -400
+	end
+	if x > 400 then
+		x = 400
+	end
+	if y < -400 then
+		y = -400
+	end
+	if y > 400 then
+		y = 400
+	end
+	if entry then
+		entry.x = x
+		entry.y = y
+	elseif db then
+		db.talentArtX = x
+		db.talentArtY = y
+	end
+	local style = LockRemindersTalentStyle(key)
+	if style ~= "icon" then
+		LockRemindersShowTalentOrnament(style, key)
+	end
+	if UpdateTalentChrome then
+		UpdateTalentChrome()
+	end
+end
+
+function ChangeTalentFade(delta)
+	local key = LockRemindersEditedTalent()
+	local entry = key and LockRemindersEnsureTalent(key)
+	local fade = LockRemindersTalentFade(key) + delta
+	fade = math.floor(fade * 10 + 0.5) / 10
+	if fade < 0 then
+		fade = 0
+	end
+	if fade > 2 then
+		fade = 2
+	end
+	if entry then
+		entry.fade = fade
+	elseif db then
+		db.talentFade = fade
+	end
+	local style = LockRemindersTalentStyle(key)
+	if style ~= "icon" then
+		LockRemindersShowTalentOrnament(style, key)
+		LockRemindersFadeTalent(key)
+	elseif talentFrame then
+		ApplyTalentFace(key)
+		talentFrame:SetAlpha(1)
+		talentFrame:Show()
+		LockRemindersFadeTalent(key)
 	end
 	if UpdateTalentChrome then
 		UpdateTalentChrome()
@@ -5878,16 +6532,12 @@ function WatchTalents(prime)
 			end
 		elseif has == false then
 			now[spellID] = false
-			if talentFrame and talentFrame.hold and not talentMoving and talentFrame:IsShown() then
+			local ornamentShown = LockRemindersTalentOrnament and LockRemindersTalentOrnament:IsShown()
+			if talentFrame and talentFrame.hold and not talentMoving and (talentFrame:IsShown() or ornamentShown) then
 				local shown = talentFrame.spellID
 				if shown == spellID or tostring(shown) == tostring(spellID) then
 					talentFrame.hold = false
-					if talentFrame.fade then
-						talentFrame.fade:Stop()
-						talentFrame.fade:Play()
-					else
-						talentFrame:Hide()
-					end
+					LockRemindersFadeTalent(shown)
 				end
 			end
 		elseif talentSeen and talentSeen[spellID] then
@@ -6217,6 +6867,7 @@ function RefreshFood()
 	ApplyFoodPoint()
 	foodFrame:Show()
 	foodFrame:SetAlpha(1)
+	LockRemindersStyleFoodIcon()
 end
 
 function LockRemindersMissIconSize()
@@ -6230,38 +6881,85 @@ function LockRemindersMissIconSize()
 	return size
 end
 
-LockRemindersSoundFiles = {
-	pulse = true, drip = true, knock = true, chime = true,
-	bloom = true, rise = true, tick = true, hum = true, spark = true, glass = true,
-	beep = true, buzz = true, chirp = true, pop = true,
-	ding = true, sweep = true, clap = true, warp = true,
+LockRemindersSoundChoices = {
+	{ "None", "none" },
+	{ "Alarms" },
+	{ "Buzz", "buzz" },
+	{ "Warn", "warn" },
+	{ "Notice", "notice" },
+	{ "Fail", "fail" },
+	{ "Alert", "alert" },
+	{ "Blast", "blast" },
+	{ "Raid", "raid" },
+	{ "Spells" },
+	{ "Fireball", "fire" },
+	{ "Chi-Ji", "chiji" },
+	{ "Zaps", "zaps" },
+	{ "Whoosh", "whoosh" },
+	{ "Fizzle" },
+	{ "Frost", "frost" },
+	{ "Holy", "holy" },
+	{ "Shadow", "shadow" },
+	{ "Fire", "firefizz" },
+	{ "Nature", "nature" },
+	{ "Interface" },
+	{ "Role", "role" },
+	{ "Scrap", "scrap" },
+	{ "Restore", "restore" },
 }
 
+LockRemindersSoundFiles = {
+	buzz = 568975,
+	warn = 566335,
+	notice = 567450,
+	fail = 903974,
+	alert = 668957,
+	blast = 566982,
+	raid = 567394,
+	fire = 1685538,
+	chiji = 1375585,
+	zaps = 4546394,
+	whoosh = 4556842,
+	frost = 569775,
+	holy = 569772,
+	shadow = 569776,
+	firefizz = 569773,
+	nature = 569774,
+	role = 567513,
+	scrap = 2173883,
+	restore = 567526,
+}
+
+LockRemindersSoundKits = {
+	raid = 12197,
+	fire = 172796,
+	chiji = 60957,
+	zaps = 339197,
+	whoosh = 305406,
+	frost = 1425,
+	holy = 1428,
+	shadow = 1427,
+	firefizz = 1424,
+	nature = 1426,
+	role = 17317,
+	scrap = 169046,
+	restore = 62541,
+}
+
+function LockRemindersKnownSound(id)
+	return id == "none" or (LockRemindersSoundFiles and LockRemindersSoundFiles[id] ~= nil)
+end
+
 function LockRemindersPlaySoundId(id)
-	if LockRemindersSoundFiles[id] then
-		if PlaySoundFile then
-			pcall(PlaySoundFile, "Interface/AddOns/LockReminders/Sounds/" .. id .. ".mp3")
-		end
-		return
-	end
-	if id ~= "alarm" and id ~= "ping" then
-		return
-	end
-	local kit, legacy, file
-	if id == "alarm" then
-		kit, legacy, file = "RAID_WARNING", "RaidWarning", "Sound\\Interface\\RaidWarning.ogg"
-	else
-		kit, legacy, file = "MAP_PING", "MapPing", "Sound\\Interface\\MapPing.ogg"
-	end
-	if SOUNDKIT and type(SOUNDKIT[kit]) == "number" then
-		if pcall(PlaySound, SOUNDKIT[kit], "SFX") then
+	local kit = LockRemindersSoundKits and LockRemindersSoundKits[id]
+	if type(kit) == "number" and PlaySound then
+		local ok, handle = pcall(PlaySound, kit, "Master")
+		if ok and handle then
 			return
 		end
 	end
-	if legacy and pcall(PlaySound, legacy, "SFX") then
-		return
-	end
-	if PlaySoundFile and file then
+	local file = LockRemindersSoundFiles and LockRemindersSoundFiles[id]
+	if type(file) == "number" and PlaySoundFile then
 		pcall(PlaySoundFile, file, "Master")
 	end
 end
@@ -7176,7 +7874,7 @@ function LockRemindersPreviewVital(kind)
 	if LockRemindersMisc.vitalMoving then
 		LockRemindersSetVitalMove(false)
 	end
-	local sound = kind == "mana" and (db and db.manaSound or "drip") or (db and db.healthSound or "pulse")
+	local sound = kind == "mana" and (db and db.manaSound or "chiji") or (db and db.healthSound or "zaps")
 	LockRemindersMisc.previewUntil = GetTime() + LockRemindersVitalHold()
 	LockRemindersSyncVital(kind ~= "mana", kind ~= "health", sound, true)
 end
@@ -7426,7 +8124,7 @@ function LockRemindersMiscTick()
 			healthLow = LockRemindersMisc.healthDown and true or false
 		end
 		if healthLow and not LockRemindersMisc.healthDown then
-			sound = db.healthSound or "pulse"
+			sound = db.healthSound or "zaps"
 		end
 	end
 	local healthWas = LockRemindersMisc.healthDown
@@ -7444,7 +8142,7 @@ function LockRemindersMiscTick()
 			manaLow = LockRemindersMisc.manaDown and true or false
 		end
 		if manaLow and not LockRemindersMisc.manaDown and not sound then
-			sound = db.manaSound or "drip"
+			sound = db.manaSound or "chiji"
 		end
 	end
 	local now = GetTime()
@@ -7562,7 +8260,9 @@ function LockRemindersRefreshMisc()
 		bar.manaLabelBox.quiet = nil
 	end
 	LockRemindersPaintChoiceRow(bar.speedLayout, db.speedSplit and "split" or "together")
-	LockRemindersPaintChoiceRow(bar.effectButtons, db.vitalStyle or "none")
+	if bar.refreshEffect then
+		bar.refreshEffect()
+	end
 	LockRemindersPaintToggle(bar.speedToggle, db.speedShow ~= false)
 	LockRemindersPaintToggle(bar.healthToggle, db.healthAlert ~= false)
 	LockRemindersPaintToggle(bar.manaToggle, db.manaAlert ~= false)
@@ -7574,74 +8274,156 @@ function LockRemindersRefreshMisc()
 	end
 end
 
-function LockRemindersMakeSoundRow(parent, y, read, write)
-	local choices = {
-		{ "None", "none" },
-		{ "Pulse", "pulse" },
-		{ "Drip", "drip" },
-		{ "Knock", "knock" },
-		{ "Chime", "chime" },
-		{ "Bloom", "bloom" },
-		{ "Rise", "rise" },
-		{ "Tick", "tick" },
-		{ "Hum", "hum" },
-		{ "Spark", "spark" },
-		{ "Glass", "glass" },
-		{ "Beep", "beep" },
-		{ "Buzz", "buzz" },
-		{ "Chirp", "chirp" },
-		{ "Pop", "pop" },
-		{ "Ding", "ding" },
-		{ "Sweep", "sweep" },
-		{ "Clap", "clap" },
-		{ "Warp", "warp" },
-	}
-	local buttons = {}
-	local function refresh()
-		local selected = read()
-		for index = 1, #buttons do
-			local button = buttons[index]
-			local picked = button.choiceId == selected
-			button.picked = picked
-			if picked then
-				Paint(button, 0.32, 0.22, 0.08, 1, 0.95, 0.78, 0.35, 1)
-				button.label:SetTextColor(1, 0.93, 0.72)
-			else
-				Paint(button, 0.14, 0.1, 0.2, 1, 0.45, 0.35, 0.62, 1)
-				button.label:SetTextColor(0.86, 0.82, 0.94)
+function LockRemindersChoiceMenu(parent, anchor, gap, choices, read, write, preview, width)
+	local button = CreateFrame("Button", nil, parent, "BackdropTemplate")
+	button:SetSize(width or 120, 22)
+	button:SetPoint("LEFT", anchor, "RIGHT", gap or 8, 0)
+	Paint(button, 0.14, 0.1, 0.2, 1, 0.45, 0.35, 0.62, 1)
+	button.label = button:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	button.label:SetPoint("LEFT", 8, 0)
+	button.label:SetPoint("RIGHT", -16, 0)
+	button.label:SetJustifyH("LEFT")
+	button.label:SetTextColor(1, 0.93, 0.72)
+	button.arrow = button:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	button.arrow:SetPoint("RIGHT", -6, 0)
+	button.arrow:SetText("v")
+	button.arrow:SetTextColor(0.9, 0.84, 1)
+	local function labelFor(id)
+		for index = 1, #choices do
+			if choices[index][2] == id then
+				return choices[index][1]
 			end
 		end
+		return choices[1][1]
 	end
-	for index = 1, #choices do
-		local text, id = choices[index][1], choices[index][2]
-		local col = (index - 1) % 10
-		local row = math.floor((index - 1) / 10)
-		local button = CreateFrame("Button", nil, parent, "BackdropTemplate")
-		button:SetSize(64, 22)
-		button:SetPoint("TOPLEFT", 8 + col * 68, y - row * 26)
-		Paint(button, 0.14, 0.1, 0.2, 1, 0.45, 0.35, 0.62, 1)
-		button.label = button:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		button.label:SetPoint("CENTER")
-		button.label:SetText(text)
-		button.choiceId = id
-		button:SetScript("OnClick", function(self)
-			write(self.choiceId)
-			if self.choiceId ~= "none" then
-				LockRemindersPlaySoundId(self.choiceId)
-			end
-			refresh()
-		end)
-		button:SetScript("OnEnter", function(self)
-			if not self.picked then
-				self:SetBackdropColor(0.24, 0.16, 0.34, 1)
-			end
-		end)
-		button:SetScript("OnLeave", function()
-			refresh()
-		end)
-		buttons[#buttons + 1] = button
+	local function refresh()
+		button.label:SetText(labelFor(read()))
 	end
-	return refresh
+	local function paintRow(row, picked)
+		row.picked = picked
+		if picked then
+			Paint(row, 0.32, 0.22, 0.08, 1, 0.95, 0.78, 0.35, 1)
+			row.label:SetTextColor(1, 0.93, 0.72)
+		else
+			Paint(row, 0.1, 0.08, 0.14, 1, 0.28, 0.22, 0.4, 1)
+			row.label:SetTextColor(0.9, 0.86, 0.98)
+		end
+	end
+	button:SetScript("OnClick", function()
+		local popup = LockRemindersChoicePopup
+		if popup and popup.owner == button and popup:IsShown() then
+			popup:Hide()
+			return
+		end
+		if not popup then
+			popup = CreateFrame("Frame", nil, UIParent, "BackdropTemplate")
+			popup:SetFrameStrata("DIALOG")
+			popup:EnableMouse(true)
+			Paint(popup, 0.07, 0.05, 0.1, 0.98, 0.45, 0.35, 0.62, 1)
+			popup.rows = {}
+			popup.blocker = CreateFrame("Button", nil, UIParent)
+			popup.blocker:SetAllPoints(UIParent)
+			popup.blocker:SetFrameStrata("DIALOG")
+			popup.blocker:SetScript("OnClick", function()
+				popup:Hide()
+			end)
+			popup:SetScript("OnHide", function(self)
+				self.owner = nil
+				if self.blocker then
+					self.blocker:Hide()
+				end
+			end)
+			LockRemindersChoicePopup = popup
+		end
+		local selected = read()
+		local y = 4
+		for index = 1, #choices do
+			local row = popup.rows[index]
+			if not row then
+				row = CreateFrame("Button", nil, popup, "BackdropTemplate")
+				row:SetHeight(22)
+				row.label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+				row.label:SetPoint("LEFT", 8, 0)
+				row.label:SetPoint("RIGHT", -8, 0)
+				row.label:SetJustifyH("LEFT")
+				row:SetScript("OnEnter", function(self)
+					if self.header or self.picked then
+						return
+					end
+					self:SetBackdropColor(0.24, 0.16, 0.34, 1)
+				end)
+				row:SetScript("OnLeave", function(self)
+					if self.header then
+						return
+					end
+					paintRow(self, self.picked)
+				end)
+				popup.rows[index] = row
+			end
+			local choice = choices[index]
+			local header = choice[2] == nil
+			local height = header and 18 or 22
+			row.header = header
+			row:SetHeight(height)
+			row:ClearAllPoints()
+			row:SetPoint("TOPLEFT", 4, -y)
+			row:SetPoint("TOPRIGHT", -4, -y)
+			row:Show()
+			row.label:SetText(choice[1])
+			y = y + height + 2
+			if header then
+				row.choiceId = nil
+				row.picked = false
+				Paint(row, 0.16, 0.12, 0.22, 1, 0.16, 0.12, 0.22, 0)
+				row.label:SetTextColor(0.78, 0.68, 0.96)
+				row:SetScript("OnClick", function() end)
+			else
+				row.choiceId = choice[2]
+				paintRow(row, row.choiceId == selected)
+				row:SetScript("OnClick", function(self)
+					write(self.choiceId)
+					if preview and self.choiceId ~= "none" then
+						preview(self.choiceId)
+					end
+					refresh()
+					popup:Hide()
+				end)
+			end
+		end
+		for index = #choices + 1, #popup.rows do
+			popup.rows[index]:Hide()
+		end
+		popup:SetSize(button:GetWidth(), y + 4)
+		popup:ClearAllPoints()
+		if (button:GetBottom() or 0) < y + 24 then
+			popup:SetPoint("BOTTOMLEFT", button, "TOPLEFT", 0, 2)
+		else
+			popup:SetPoint("TOPLEFT", button, "BOTTOMLEFT", 0, -2)
+		end
+		popup:SetFrameLevel((popup.blocker:GetFrameLevel() or 1) + 10)
+		popup.owner = button
+		popup.blocker:Show()
+		popup:Show()
+	end)
+	button:SetScript("OnEnter", function(self)
+		self:SetBackdropColor(0.24, 0.16, 0.34, 1)
+	end)
+	button:SetScript("OnLeave", function(self)
+		self:SetBackdropColor(0.14, 0.1, 0.2, 1)
+	end)
+	if parent and parent.HookScript then
+		parent:HookScript("OnHide", function()
+			if LockRemindersChoicePopup and LockRemindersChoicePopup.owner == button then
+				LockRemindersChoicePopup:Hide()
+			end
+		end)
+	end
+	refresh()
+	return refresh, button
+end
+
+function LockRemindersMakeSoundRow(parent, anchor, read, write)
+	return LockRemindersChoiceMenu(parent, anchor, 8, LockRemindersSoundChoices, read, write, LockRemindersPlaySoundId, 156)
 end
 
 function LockRemindersOpenSettings(owner, key)
@@ -8128,7 +8910,7 @@ function LockRemindersBuildMisc(owner)
 	bar.speedLayout = { together, split }
 
 	LockRemindersSettingsHead(bar, "Alerts")
-	local health = LockRemindersSettingsCard(bar, 136, "Interface\\Icons\\INV_Potion_54", "Low health", "You")
+	local health = LockRemindersSettingsCard(bar, 82, "Interface\\Icons\\INV_Potion_54", "Low health", "You")
 	bar.healthToggle = toggle(health, "healthAlert", 176, -14)
 	local healthBelow = LockRemindersSettingsCaption(health, bar.healthToggle, "Below", 12)
 	local healthPlus
@@ -8145,13 +8927,14 @@ function LockRemindersBuildMisc(owner)
 	healthTextLabel:ClearAllPoints()
 	healthTextLabel:SetPoint("TOPLEFT", 176, -50)
 	bar.healthLabelBox = LockRemindersSettingsEdit(health, healthTextLabel, "healthLabel", "LOW HEALTH", 160, LockRemindersApplyVitalLook)
-	bar.refreshHealth = LockRemindersMakeSoundRow(health, -78, function()
-		return db and db.healthSound or "pulse"
+	local healthSoundLabel = LockRemindersSettingsCaption(health, bar.healthLabelBox, "Sound", 12)
+	bar.refreshHealth = LockRemindersMakeSoundRow(health, healthSoundLabel, function()
+		return db and db.healthSound or "zaps"
 	end, function(id)
 		db.healthSound = id
 	end)
 
-	local mana = LockRemindersSettingsCard(bar, 136, "Interface\\Icons\\INV_Potion_76", "Low mana", "You")
+	local mana = LockRemindersSettingsCard(bar, 82, "Interface\\Icons\\INV_Potion_76", "Low mana", "You")
 	bar.manaToggle = toggle(mana, "manaAlert", 176, -14)
 	local manaBelow = LockRemindersSettingsCaption(mana, bar.manaToggle, "Below", 12)
 	local manaPlus
@@ -8168,8 +8951,9 @@ function LockRemindersBuildMisc(owner)
 	manaTextLabel:ClearAllPoints()
 	manaTextLabel:SetPoint("TOPLEFT", 176, -50)
 	bar.manaLabelBox = LockRemindersSettingsEdit(mana, manaTextLabel, "manaLabel", "LOW MANA", 160, LockRemindersApplyVitalLook)
-	bar.refreshMana = LockRemindersMakeSoundRow(mana, -78, function()
-		return db and db.manaSound or "drip"
+	local manaSoundLabel = LockRemindersSettingsCaption(mana, bar.manaLabelBox, "Sound", 12)
+	bar.refreshMana = LockRemindersMakeSoundRow(mana, manaSoundLabel, function()
+		return db and db.manaSound or "chiji"
 	end, function(id)
 		db.manaSound = id
 	end)
@@ -8204,47 +8988,24 @@ function LockRemindersBuildMisc(owner)
 	effectLabel:SetPoint("TOPLEFT", 176, -50)
 	effectLabel:SetText("Effect")
 	effectLabel:SetTextColor(0.9, 0.84, 1)
-	local effectChoices = {
+	bar.refreshEffect = LockRemindersChoiceMenu(vital, effectLabel, 8, {
 		{ "None", "none" },
 		{ "Pulse", "pulse" },
 		{ "Shake", "shake" },
 		{ "Bounce", "bounce" },
 		{ "Flash", "flash" },
 		{ "Pop", "pop" },
-	}
-	bar.effectButtons = {}
-	for index = 1, #effectChoices do
-		local button = CreateFrame("Button", nil, vital, "BackdropTemplate")
-		button:SetSize(64, 22)
-		button:SetPoint("LEFT", effectLabel, "RIGHT", 8 + (index - 1) * 68, 0)
-		Paint(button, 0.14, 0.1, 0.2, 1, 0.45, 0.35, 0.62, 1)
-		button.label = button:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		button.label:SetPoint("CENTER")
-		button.label:SetText(effectChoices[index][1])
-		button.choiceId = effectChoices[index][2]
-		button:SetScript("OnClick", function(self)
-			db.vitalStyle = self.choiceId
-			LockRemindersApplyVitalFace()
-			if not LockRemindersMisc.vitalMoving then
-				LockRemindersMisc.previewUntil = GetTime() + math.max(LockRemindersVitalHold(), 2)
-				LockRemindersSyncVital(true, true, nil, true)
-			end
-			LockRemindersRefreshMisc()
-		end)
-		button:SetScript("OnEnter", function(self)
-			if not self.picked then
-				self:SetBackdropColor(0.24, 0.16, 0.34, 1)
-			end
-		end)
-		button:SetScript("OnLeave", function(self)
-			if self.picked then
-				self:SetBackdropColor(0.32, 0.22, 0.08, 1)
-			else
-				self:SetBackdropColor(0.14, 0.1, 0.2, 1)
-			end
-		end)
-		bar.effectButtons[index] = button
-	end
+	}, function()
+		return db.vitalStyle or "none"
+	end, function(id)
+		db.vitalStyle = id
+		LockRemindersApplyVitalFace()
+		if not LockRemindersMisc.vitalMoving then
+			LockRemindersMisc.previewUntil = GetTime() + math.max(LockRemindersVitalHold(), 2)
+			LockRemindersSyncVital(true, true, nil, true)
+		end
+		LockRemindersRefreshMisc()
+	end)
 	LockRemindersSettingsFinish(bar)
 end
 
@@ -10108,6 +10869,92 @@ function LockRemindersHasSoulstone()
 	return found
 end
 
+function LockRemindersOwnSoulBuff()
+	local units = { "player" }
+	local grouped = (IsInRaid and IsInRaid()) or (IsInGroup and IsInGroup())
+	if IsInRaid and IsInRaid() then
+		local count = (GetNumGroupMembers and GetNumGroupMembers()) or 0
+		if count > 40 then
+			count = 40
+		end
+		for index = 1, count do
+			units[#units + 1] = "raid" .. index
+		end
+	elseif IsInGroup and IsInGroup() then
+		local count = (GetNumSubgroupMembers and GetNumSubgroupMembers()) or 0
+		if count > 4 then
+			count = 4
+		end
+		for index = 1, count do
+			units[#units + 1] = "party" .. index
+		end
+	end
+	if UnitExists and UnitExists("target") then
+		units[#units + 1] = "target"
+	end
+	local playerName = LockRemindersUnitLabel("player", false)
+	local otherLock = false
+	local unknown = false
+	for index = 1, #units do
+		local unit = units[index]
+		if not UnitExists or UnitExists(unit) then
+			local mine = unit == "player"
+			if not mine and UnitIsUnit then
+				local sameOk, same = pcall(UnitIsUnit, unit, "player")
+				mine = sameOk and same == true
+			end
+			if not mine and grouped and UnitClass then
+				local ok, _, classFile = pcall(UnitClass, unit)
+				if ok and not LockRemindersSecret(classFile) and classFile == "WARLOCK" then
+					otherLock = true
+				end
+			end
+			for buffIndex = 1, 40 do
+				local buff = LockRemindersReadBuff(unit, buffIndex)
+				if buff == false then
+					break
+				end
+				if type(buff) == "table" and LockRemindersIsSoulAura(buff) then
+					if buff.caster and UnitIsUnit then
+						local ok, same = pcall(UnitIsUnit, buff.caster, "player")
+						if ok and same == true then
+							return true
+						end
+					end
+					local casterName = buff.casterName
+					if playerName ~= "Unknown" and type(casterName) == "string" and (casterName == playerName or casterName:match("^([^%-]+)") == playerName) then
+						return true
+					end
+					local key = LockRemindersUnitKey(unit)
+					local remembered = key and LockRemindersSoul.applied and LockRemindersSoul.applied[key]
+					if remembered and playerName ~= "Unknown" and remembered.name == playerName and (not remembered.at or GetTime() - remembered.at < 1800) then
+						return true
+					end
+					if not buff.caster and not casterName and (unit ~= "target" or not grouped) then
+						unknown = true
+					end
+				end
+			end
+		end
+	end
+	return unknown and not otherLock
+end
+
+function LockRemindersSoulstoneCovered()
+	if LockRemindersHasSoulstone() then
+		return true
+	end
+	local left = LockRemindersPlayerSoulLeft()
+	if type(left) == "number" and left > 0 then
+		return true
+	end
+	local saved = LockRemindersSoulRemaining(LockRemindersUnitKey("player"))
+	if type(saved) == "number" and saved > 0 then
+		return true
+	end
+	return LockRemindersOwnSoulBuff()
+end
+
 function LockRemindersSoulIcon()
 	local icon = SpellIcon(20707)
 	if icon and icon ~= 134400 then
@@ -10142,48 +10989,64 @@ function LockRemindersIsSoulAura(buff)
 	return LockRemindersIsSoulName(buff.name)
 end
 
+function LockRemindersPlainNumber(value)
+	if value == nil or LockRemindersSecret(value) then
+		return nil
+	end
+	local ok, kind = pcall(type, value)
+	if not ok or kind ~= "number" then
+		return nil
+	end
+	return value
+end
+
+function LockRemindersReadAuraField(aura, field)
+	local ok, value = pcall(function()
+		return aura[field]
+	end)
+	if not ok or value == nil or LockRemindersSecret(value) then
+		return nil
+	end
+	return value
+end
+
 function LockRemindersReadBuff(unit, index)
 	if C_UnitAuras and C_UnitAuras.GetBuffDataByIndex then
 		local ok, aura = pcall(C_UnitAuras.GetBuffDataByIndex, unit, index)
 		if ok and type(aura) == "table" and not LockRemindersSecret(aura) then
-			local spellID = aura.spellId or aura.spellID
-			local name = aura.name
-			local duration = aura.duration
-			local expires = aura.expirationTime
-			local icon = aura.icon
-			local caster = aura.sourceUnit
-			local casterName = aura.sourceName
+			local spellID = LockRemindersReadAuraField(aura, "spellId") or LockRemindersReadAuraField(aura, "spellID")
+			local name = LockRemindersReadAuraField(aura, "name")
+			local duration = LockRemindersPlainNumber(LockRemindersReadAuraField(aura, "duration"))
+			local expires = LockRemindersPlainNumber(LockRemindersReadAuraField(aura, "expirationTime"))
+			local icon = LockRemindersReadAuraField(aura, "icon")
+			local caster = LockRemindersReadAuraField(aura, "sourceUnit")
+			local casterName = LockRemindersReadAuraField(aura, "sourceName")
 			if LockRemindersSecret(spellID) then
 				spellID = nil
 			end
-			if LockRemindersSecret(name) then
+			if LockRemindersSecret(name) or type(name) ~= "string" then
 				name = nil
-			end
-			if LockRemindersSecret(duration) then
-				duration = nil
-			end
-			if LockRemindersSecret(expires) then
-				expires = nil
 			end
 			if LockRemindersSecret(icon) then
 				icon = nil
 			end
-			if LockRemindersSecret(caster) then
+			if LockRemindersSecret(caster) or type(caster) ~= "string" then
 				caster = nil
 			end
 			if LockRemindersSecret(casterName) or type(casterName) ~= "string" or casterName == "" then
 				casterName = nil
 			end
-			if not name and not tonumber(spellID) then
+			spellID = LockRemindersPlainNumber(spellID)
+			if not name and not spellID then
 				return nil
 			end
 			return {
-				spellID = tonumber(spellID),
-				name = type(name) == "string" and name or nil,
+				spellID = spellID,
+				name = name,
 				icon = icon,
-				duration = tonumber(duration),
-				expires = tonumber(expires),
-				caster = type(caster) == "string" and caster or nil,
+				duration = duration,
+				expires = expires,
+				caster = caster,
 				casterName = casterName,
 			}
 		end
@@ -10204,24 +11067,20 @@ function LockRemindersReadBuff(unit, index)
 	if LockRemindersSecret(name) then
 		return nil
 	end
-	if LockRemindersSecret(duration) then
-		duration = nil
-	end
-	if LockRemindersSecret(expires) then
-		expires = nil
-	end
+	duration = LockRemindersPlainNumber(duration)
+	expires = LockRemindersPlainNumber(expires)
 	if LockRemindersSecret(icon) then
 		icon = nil
 	end
-	if LockRemindersSecret(caster) then
+	if LockRemindersSecret(caster) or type(caster) ~= "string" then
 		caster = nil
 	end
 	return {
 		name = name,
 		icon = icon,
-		duration = tonumber(duration),
-		expires = tonumber(expires),
-		caster = type(caster) == "string" and caster or nil,
+		duration = duration,
+		expires = expires,
+		caster = caster,
 	}
 end
 
@@ -10371,15 +11230,24 @@ function LockRemindersSoulSnapshot()
 			if type(buff) == "table" and LockRemindersIsSoulAura(buff) then
 				local left, duration, ends
 				LockRemindersSoul.timers = LockRemindersSoul.timers or {}
-				if buff.expires and buff.expires > 0 then
-					ends = buff.expires
+				local now = GetTime()
+				local fresh = LockRemindersPlainNumber(buff.expires)
+				local saved = (info.key and LockRemindersSoul.timers[info.key]) or (info.name and LockRemindersSoul.timers[info.name])
+				saved = LockRemindersPlainNumber(saved)
+				if fresh and fresh > now then
+					ends = fresh
+				elseif saved and saved > now then
+					ends = saved
+				end
+				if ends and info.key then
 					LockRemindersSoul.timers[info.key] = ends
-				elseif LockRemindersSoul.timers[info.key] and LockRemindersSoul.timers[info.key] > GetTime() then
-					ends = LockRemindersSoul.timers[info.key]
+				end
+				if ends and info.name and info.name ~= "" and info.name ~= "Unknown" then
+					LockRemindersSoul.timers[info.name] = ends
 				end
 				if ends then
-					left = ends - GetTime()
-					duration = buff.duration
+					left = ends - now
+					duration = LockRemindersPlainNumber(buff.duration)
 					if not duration or duration <= 0 then
 						duration = left
 					end
@@ -10433,10 +11301,13 @@ function LockRemindersSoulSnapshot()
 	local unused = {}
 	for index = 1, #units do
 		local info = units[index]
-		if info.grouped and info.class == "WARLOCK" and not used[info.key] then
+			if info.grouped and info.class == "WARLOCK" and not used[info.key] then
 			local left, duration
-			if UnitIsUnit and UnitIsUnit(info.unit, "player") then
-				left, duration = LockRemindersPlayerSoulLeft()
+			if UnitIsUnit then
+				local sameOk, same = pcall(UnitIsUnit, info.unit, "player")
+				if sameOk and same == true then
+					left, duration = LockRemindersPlayerSoulLeft()
+				end
 			end
 			if not left then
 				left, duration = LockRemindersSoulRemaining(info.key)
@@ -10460,9 +11331,48 @@ function LockRemindersSoulSnapshot()
 	return active, unused
 end
 
+function LockRemindersSoulTrackFade()
+	local fade = tonumber(db and db.soulTrackFade)
+	if not fade then
+		fade = 92
+	end
+	fade = math.floor(fade + 0.5)
+	if fade < 0 then
+		fade = 0
+	elseif fade > 100 then
+		fade = 100
+	end
+	return fade
+end
+
+function LockRemindersSoulTrackFont()
+	local size = tonumber(db and db.soulTrackFont) or 10
+	if size < 10 then
+		size = 10
+	elseif size > 28 then
+		size = 28
+	end
+	return size
+end
+
+function LockRemindersSetFontSize(fs, size)
+	if not fs or not fs.GetFont or not fs.SetFont then
+		return
+	end
+	local font, _, flags = fs:GetFont()
+	if type(font) ~= "string" or font == "" then
+		font = "Fonts\\FRIZQT__.TTF"
+	end
+	fs:SetFont(font, size, flags)
+end
+
 function LockRemindersLayoutSoulRow(row)
-	row:SetHeight(40)
-	row.icon:SetSize(28, 28)
+	local fontSize = LockRemindersSoulTrackFont()
+	LockRemindersSetFontSize(row.name, fontSize)
+	LockRemindersSetFontSize(row.time, math.max(8, fontSize - 3))
+	row:SetHeight(math.max(40, fontSize + 28))
+	local icon = math.max(28, fontSize + 14)
+	row.icon:SetSize(icon, icon)
 	row.icon:ClearAllPoints()
 	row.icon:SetPoint("LEFT", 4, 4)
 	row.name:ClearAllPoints()
@@ -10513,6 +11423,39 @@ function LockRemindersSoulRow(index)
 	return row
 end
 
+function LockRemindersTickSoulRows()
+	local rows = LockRemindersSoul and LockRemindersSoul.rows
+	if not rows then
+		return
+	end
+	local now = GetTime()
+	for index = 1, #rows do
+		local row = rows[index]
+		if row:IsShown() and type(row.ends) == "number" then
+			local left = row.ends - now
+			if left < 0 then
+				left = 0
+			end
+			if row.time then
+				row.time:SetText(LockRemindersClock(left))
+			end
+			local duration = tonumber(row.duration) or 0
+			if duration > 0 and row.fill and row.fill:IsShown() and row.track then
+				local width = row.track:GetWidth() or 0
+				if width > 0 then
+					local fraction = left / duration
+					if fraction < 0 then
+						fraction = 0
+					elseif fraction > 1 then
+						fraction = 1
+					end
+					row.fill:SetWidth(math.max(fraction * width, 0.01))
+				end
+			end
+		end
+	end
+end
+
 function LockRemindersPaintSoulRow(row, info, kind)
 	local r, g, b = LockRemindersClassColor(info.class)
 	local function channel(value)
@@ -10534,11 +11477,25 @@ function LockRemindersPaintSoulRow(row, info, kind)
 		row.name:SetTextColor(r, g, b)
 	end
 	row.icon:SetTexture(info.icon or LockRemindersSoulIcon())
-	local left = tonumber(info.ends) and (info.ends - GetTime()) or tonumber(info.left)
+	local freshEnds = LockRemindersPlainNumber(info.ends)
+	local now = GetTime()
+	if freshEnds and freshEnds > now then
+		row.ends = freshEnds
+		row.who = info.name
+	elseif row.who == info.name and type(row.ends) == "number" and row.ends > now then
+		freshEnds = row.ends
+	else
+		row.ends = nil
+		row.who = info.name
+	end
+	if LockRemindersPlainNumber(info.duration) then
+		row.duration = info.duration
+	end
+	local left = (type(row.ends) == "number" and (row.ends - now)) or tonumber(info.left)
 	if left and left < 0 then
 		left = 0
 	end
-	local duration = tonumber(info.duration) or 0
+	local duration = tonumber(row.duration) or tonumber(info.duration) or 0
 	local fraction = 0
 	if left and left > 0 and duration > 0 then
 		fraction = left / duration
@@ -10599,6 +11556,7 @@ function LockRemindersApplySoulLook()
 		font = "Fonts\\FRIZQT__.TTF"
 	end
 	frame.label:SetFont(font, math.max(10, math.floor(size * 0.28)), "OUTLINE")
+	LockRemindersSyncSoulClick()
 end
 
 function LockRemindersShowSoulAlert(replay)
@@ -10627,7 +11585,7 @@ function LockRemindersShowSoulAlert(replay)
 		end
 		if not LockRemindersSoul.alertPlayed then
 			LockRemindersSoul.alertPlayed = true
-			LockRemindersPlaySoundId(db and db.soulSound or "chime")
+			LockRemindersPlaySoundId(db and db.soulSound or "chiji")
 		end
 	end
 	if frame.glow.ag and not frame.glow.ag:IsPlaying() then
@@ -10672,6 +11630,87 @@ function LockRemindersSetSoulMove(on)
 		LockRemindersUpdateSoul()
 	end
 	LockRemindersRefreshSoul()
+	LockRemindersSyncSoulClick()
+end
+
+function LockRemindersSoulCastName()
+	local spells = { 47884, 27238, 20757, 20756, 20755, 20752, 693 }
+	for index = 1, #spells do
+		local spellID = spells[index]
+		local known = false
+		if IsPlayerSpell then
+			local ok, result = pcall(IsPlayerSpell, spellID)
+			if ok and result == true then
+				known = true
+			elseif ok and result == false then
+				known = false
+			else
+				known = KnowsSpell(spellID)
+			end
+		else
+			known = KnowsSpell(spellID)
+		end
+		if known then
+			local name = SpellName(spellID)
+			if type(name) ~= "string" or name == "" or name:find("^Spell ", 1, true) or name:find("^Hechizo ", 1, true) then
+				name = nil
+			end
+			if not name and GetSpellInfo then
+				local ok, info = pcall(GetSpellInfo, spellID)
+				if ok and type(info) == "string" and info ~= "" then
+					name = info
+				end
+			end
+			if name then
+				return name
+			end
+		end
+	end
+end
+
+function LockRemindersSoulClickText()
+	local items = { 36895, 22116, 16896, 16895, 16893, 16892, 5232 }
+	local lines = {}
+	for index = 1, #items do
+		lines[#lines + 1] = "/use item:" .. items[index]
+	end
+	local name = LockRemindersSoulCastName()
+	if name then
+		lines[#lines + 1] = "/cast " .. name
+	end
+	return table.concat(lines, "\n")
+end
+
+function LockRemindersSyncSoulClick()
+	local frame = LockRemindersSoul and LockRemindersSoul.alert
+	if not frame or not frame.icon then
+		return
+	end
+	if InCombatLockdown and InCombatLockdown() then
+		return
+	end
+	local button = frame.click
+	if not button then
+		local ok, created = pcall(CreateFrame, "Button", "LockRemindersSoulClick", frame, "SecureActionButtonTemplate")
+		if not ok or not created then
+			return
+		end
+		button = created
+		button:RegisterForClicks("LeftButtonUp")
+		button:SetAttribute("type", "macro")
+		frame.click = button
+	end
+	button:SetAttribute("macrotext", LockRemindersSoulClickText())
+	button:ClearAllPoints()
+	button:SetAllPoints(frame.icon)
+	button:SetFrameLevel((frame:GetFrameLevel() or 1) + 8)
+	if LockRemindersSoul.moving then
+		button:EnableMouse(false)
+		button:Hide()
+	else
+		button:EnableMouse(true)
+		button:Show()
+	end
 end
 
 function LockRemindersSetSoulTrackMove(on)
@@ -10738,6 +11777,17 @@ function LockRemindersApplySoulTrackLook()
 	end
 	db.soulTrackSize = size
 	frame:SetScale(size / 100)
+	if frame.title then
+		frame.title:Hide()
+	end
+	if frame.activeTitle then
+		frame.activeTitle:Hide()
+	end
+	if frame.readyTitle then
+		frame.readyTitle:Hide()
+	end
+	local fade = LockRemindersSoulTrackFade() / 100
+	frame:SetBackdropColor(0.06, 0.05, 0.08, fade)
 	if LockRemindersSoul.trackMoving then
 		frame:SetBackdropBorderColor(0.85, 0.7, 1, 1)
 	elseif db.soulTrackFrame ~= false then
@@ -10770,17 +11820,12 @@ function LockRemindersUpdateSoulTracker()
 		frame:Hide()
 		return
 	end
-	local y = -26
+	local y = -8
 	local rowIndex = 0
-	local function place(list, kind, title)
+	local function place(list, kind)
 		if #list == 0 then
-			title:Hide()
 			return
 		end
-		title:Show()
-		title:ClearAllPoints()
-		title:SetPoint("TOPLEFT", 10, y)
-		y = y - 16
 		for index = 1, #list do
 			rowIndex = rowIndex + 1
 			local row = LockRemindersSoulRow(rowIndex)
@@ -10790,12 +11835,16 @@ function LockRemindersUpdateSoulTracker()
 			y = y - row:GetHeight() - 4
 		end
 	end
-	place(active, "active", frame.activeTitle)
-	place(unused, "ready", frame.readyTitle)
+	place(active, "active")
+	if #active > 0 and #unused > 0 then
+		y = y - 10
+	end
+	place(unused, "ready")
 	for index = rowIndex + 1, #LockRemindersSoul.rows do
 		LockRemindersSoul.rows[index]:Hide()
 	end
 	local widest = 80
+	local timeWidth = 48
 	for index = 1, rowIndex do
 		local row = LockRemindersSoul.rows[index]
 		local textWidth = row.name:GetStringWidth() or 0
@@ -10808,15 +11857,20 @@ function LockRemindersUpdateSoulTracker()
 		if textWidth > widest then
 			widest = textWidth
 		end
+		local clockWidth = row.time:GetStringWidth() or 0
+		if clockWidth > timeWidth then
+			timeWidth = clockWidth
+		end
 	end
-	local width = math.max(260, math.min(460, widest + 130))
+	local width = math.max(260, math.min(720, widest + timeWidth + 80))
 	frame:SetWidth(width)
 	for index = 1, rowIndex do
 		local row = LockRemindersSoul.rows[index]
 		row:SetWidth(width - 16)
-		local barWidth = math.max(80, width - 16 - 48)
+		local icon = math.max(28, LockRemindersSoulTrackFont() + 14)
+		local barWidth = math.max(80, width - 16 - icon - 24)
 		row.track:SetWidth(barWidth)
-		row.name:SetWidth(math.max(widest + 4, 60))
+		row.name:SetWidth(math.max(width - timeWidth - 70, 60))
 		if row.by then
 			row.by:SetWidth(math.max(widest + 4, 60))
 		end
@@ -10856,7 +11910,7 @@ function LockRemindersUpdateSoul()
 	if LockRemindersSoul.previewUntil and GetTime() < LockRemindersSoul.previewUntil then
 		return
 	end
-	local show = db.soulAlert ~= false and ScopeActive(db.soulScope or { always = true }) and not LockRemindersHasSoulstone() and not Blocked()
+	local show = db.soulAlert ~= false and ScopeActive(db.soulScope or { always = true }) and not LockRemindersSoulstoneCovered() and not Blocked()
 	LockRemindersSoul.missing = show
 	if show then
 		LockRemindersShowSoulAlert(false)
@@ -10890,6 +11944,12 @@ function LockRemindersRefreshSoul()
 	end
 	if bar.trackSize then
 		bar.trackSize:SetText(tostring(tonumber(db.soulTrackSize) or 100))
+	end
+	if bar.trackFont then
+		bar.trackFont:SetText(tostring(LockRemindersSoulTrackFont()))
+	end
+	if bar.trackFade then
+		bar.trackFade:SetText(tostring(LockRemindersSoulTrackFade()))
 	end
 	if bar.moveButton then
 		bar.moveButton.label:SetText(LockRemindersSoul.moving and "Done" or "Move")
@@ -11082,7 +12142,7 @@ function LockRemindersBuildSoul(owner)
 	end
 
 	LockRemindersSettingsHead(bar, "Soulstone")
-	local missing = LockRemindersSettingsCard(bar, 146, LockRemindersSoulIcon(), "Missing stone", "No stone")
+	local missing = LockRemindersSettingsCard(bar, 114, LockRemindersSoulIcon(), "Missing stone", "No stone")
 	bar.alertToggle = toggle(missing, "soulAlert", 176, -14)
 	bar.alertChecks = LockRemindersMakeScopeChecks(missing, bar.alertToggle, "soulScope")
 	local sizeLabel = LockRemindersSettingsCaption(missing, bar.alertChecks.always.caption, "Size", 12)
@@ -11109,8 +12169,12 @@ function LockRemindersBuildSoul(owner)
 	end, true)
 	bar.soulGlow = LockRemindersGlowSwatch(missing, bar.soulLabel, 12, "soulGlow", 0.72, 0.4, 1, LockRemindersApplySoulLook)
 	LockRemindersGlowBorderControl(missing, bar.soulGlow, 10, "soulGlowSize", LockRemindersApplySoulLook)
-	bar.refreshSound = LockRemindersMakeSoundRow(missing, -84, function()
-		return db and db.soulSound or "chime"
+	local soulSoundLabel = missing:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	soulSoundLabel:SetPoint("TOPLEFT", 176, -84)
+	soulSoundLabel:SetText("Sound")
+	soulSoundLabel:SetTextColor(0.9, 0.84, 1)
+	bar.refreshSound = LockRemindersMakeSoundRow(missing, soulSoundLabel, function()
+		return db and db.soulSound or "chiji"
 	end, function(id)
 		db.soulSound = id
 	end)
@@ -11142,6 +12206,25 @@ function LockRemindersBuildSoul(owner)
 	end)
 	bar.fullName = checkBox(track, 176, -50, "Full name", "soulFullName")
 	bar.trackFrame = checkBox(track, 280, -50, "Frame", "soulTrackFrame", LockRemindersApplySoulTrackLook)
+	local trackTextLabel = LockRemindersSettingsCaption(track, bar.trackFrame.caption, "Text", 16)
+	local trackTextPlus
+	trackTextPlus, bar.trackFont = step(track, trackTextLabel, function()
+		return LockRemindersSoulTrackFont()
+	end, function(value)
+		db.soulTrackFont = value
+		LockRemindersApplySoulTrackLook()
+		LockRemindersUpdateSoul()
+		LockRemindersRefreshSoul()
+	end, 10, 28, 2)
+	local trackFadeLabel = LockRemindersSettingsCaption(track, trackTextPlus, "Fade", 16)
+	local trackFadePlus
+	trackFadePlus, bar.trackFade = step(track, trackFadeLabel, function()
+		return LockRemindersSoulTrackFade()
+	end, function(value)
+		db.soulTrackFade = value
+		LockRemindersApplySoulTrackLook()
+		LockRemindersRefreshSoul()
+	end, 0, 100, 5)
 
 	LockRemindersSettingsHead(bar, "Banish")
 	local banish = LockRemindersSettingsCard(bar, 90, "Interface\\Icons\\Spell_Shadow_Cripple", "Banish", "Countdown")
@@ -11884,7 +12967,7 @@ function LockRemindersUpdateClassAlerts()
 			paintBanish(left, name or "", key)
 			if key ~= LockRemindersWarlock.banishKey then
 				LockRemindersWarlock.banishKey = key
-				LockRemindersPlaySoundId(db.soulSound or "chime")
+				LockRemindersPlaySoundId(db.soulSound or "chiji")
 			end
 		else
 			banish:Hide()
@@ -11909,7 +12992,7 @@ function LockRemindersUpdateClassAlerts()
 		local crossed = LockRemindersWarlock.lastShards and LockRemindersWarlock.lastShards > 0 and count == 0
 		LockRemindersWarlock.lastShards = count
 		if crossed and LockRemindersClassShown("shardShow", "shardScope") then
-			LockRemindersPlaySoundId(db.soulSound or "knock")
+			LockRemindersPlaySoundId(db.soulSound or "chiji")
 		end
 	end
 	if count == nil or not LockRemindersClassShown("shardShow", "shardScope") then
@@ -12064,6 +13147,7 @@ function CreateSoulAlerts()
 	end)
 	LockRemindersApplySoulLook()
 	LockRemindersApplyNamedPoint(frame, "soulPoint", { "CENTER", "CENTER", 0, 180 })
+	LockRemindersSyncSoulClick()
 	frame:Hide()
 
 	local tracker = CreateFrame("Frame", "LockRemindersSoulTracker", UIParent, "BackdropTemplate")
@@ -12082,11 +13166,10 @@ function CreateSoulAlerts()
 		self:StopMovingOrSizing()
 		LockRemindersSaveNamedPoint(self, "soulTrackPoint")
 	end)
+	tracker:SetScript("OnUpdate", function()
+		LockRemindersTickSoulRows()
+	end)
 	Paint(tracker, 0.06, 0.05, 0.08, 0.92, 0.45, 0.32, 0.62, 1)
-	tracker.title = tracker:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-	tracker.title:SetPoint("TOPLEFT", 10, -8)
-	tracker.title:SetText("Soulstone")
-	tracker.title:SetTextColor(0.86, 0.72, 1)
 	tracker.activeTitle = tracker:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	tracker.activeTitle:SetText("Active")
 	tracker.activeTitle:SetTextColor(0.78, 0.7, 0.95)
@@ -12242,11 +13325,13 @@ function CreateTalentAlert()
 	fadeOut:SetDuration(0.35)
 	fade:SetScript("OnFinished", function()
 		if talentFrame and not talentMoving then
+			LockRemindersHideTalentOrnament()
 			talentFrame:Hide()
 			talentFrame:SetAlpha(1)
 		end
 	end)
 	talentFrame.fade = fade
+	talentFrame.fadeOut = fadeOut
 	talentFrame.hint = talentFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	talentFrame.hint:SetPoint("TOP", talentFrame, "BOTTOM", 0, -6)
 	talentFrame.hint:SetText("Drag")
@@ -12448,7 +13533,7 @@ local function CreatePanel()
 	talentBar = CreateFrame("Frame", nil, panel)
 	talentBar:SetPoint("TOPLEFT", 14, -112)
 	talentBar:SetPoint("TOPRIGHT", -16, -112)
-	talentBar:SetHeight(470)
+	talentBar:SetHeight(278)
 	talentBar:Hide()
 
 	panel.foodBar = CreateFrame("Frame", nil, panel)
@@ -12496,7 +13581,7 @@ local function CreatePanel()
 	panel.spellBar = CreateFrame("Frame", nil, panel)
 	panel.spellBar:SetPoint("TOPLEFT", 14, -112)
 	panel.spellBar:SetPoint("TOPRIGHT", -16, -112)
-	panel.spellBar:SetHeight(132)
+	panel.spellBar:SetHeight(104)
 	panel.spellBar:Hide()
 	local missSizeLabel = panel.spellBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	missSizeLabel:SetPoint("TOPLEFT", 4, -8)
@@ -12607,77 +13692,19 @@ local function CreatePanel()
 	panel.spellBar.immuneTest:SetScript("OnLeave", function(self)
 		self:SetBackdropColor(0.32, 0.24, 0.08, 1)
 	end)
-	panel.spellBar.sounds = {}
-	local function missSoundButton(text, id, x, y)
-		local button = CreateFrame("Button", nil, panel.spellBar, "BackdropTemplate")
-		button:SetSize(60, 22)
-		button:SetPoint("TOPLEFT", x, y or -68)
-		Paint(button, 0.14, 0.1, 0.2, 1, 0.45, 0.35, 0.62, 1)
-		button.label = button:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		button.label:SetPoint("CENTER")
-		button.label:SetText(text)
-		button.choiceId = id
-		button:SetScript("OnClick", function()
-			db.missSound = id
-			LockRemindersPlayMissSound()
-			if panel.spellBar.refresh then
-				panel.spellBar.refresh()
-			end
-		end)
-		button:SetScript("OnEnter", function(self)
-			if not self.picked then
-				self:SetBackdropColor(0.24, 0.16, 0.34, 1)
-			end
-		end)
-		button:SetScript("OnLeave", function(self)
-			if panel.spellBar.refresh then
-				panel.spellBar.refresh()
-			end
-		end)
-		panel.spellBar.sounds[#panel.spellBar.sounds + 1] = button
-	end
-	local missSounds = {
-		{ "None", "none" },
-		{ "Alarm", "alarm" },
-		{ "Ping", "ping" },
-		{ "Pulse", "pulse" },
-		{ "Drip", "drip" },
-		{ "Knock", "knock" },
-		{ "Chime", "chime" },
-		{ "Bloom", "bloom" },
-		{ "Rise", "rise" },
-		{ "Tick", "tick" },
-		{ "Hum", "hum" },
-		{ "Spark", "spark" },
-		{ "Glass", "glass" },
-		{ "Beep", "beep" },
-		{ "Buzz", "buzz" },
-		{ "Chirp", "chirp" },
-		{ "Pop", "pop" },
-		{ "Ding", "ding" },
-		{ "Sweep", "sweep" },
-		{ "Clap", "clap" },
-		{ "Warp", "warp" },
-	}
-	for index = 1, #missSounds do
-		local col = (index - 1) % 11
-		local row = math.floor((index - 1) / 11)
-		missSoundButton(missSounds[index][1], missSounds[index][2], 4 + col * 64, -68 - row * 26)
-	end
+	local missSoundLabel = panel.spellBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	missSoundLabel:SetPoint("TOPLEFT", 4, -76)
+	missSoundLabel:SetText("Sound")
+	missSoundLabel:SetTextColor(0.9, 0.84, 1)
+	panel.spellBar.refreshSound = LockRemindersMakeSoundRow(panel.spellBar, missSoundLabel, function()
+		return db and db.missSound or "zaps"
+	end, function(id)
+		db.missSound = id
+	end)
 	panel.spellBar.refresh = function()
 		LockRemindersPaintToggle(panel.spellBar.immuneToggle, not db or db.immuneAlert ~= false)
-		local selected = db and db.missSound or "ping"
-		for index = 1, #panel.spellBar.sounds do
-			local button = panel.spellBar.sounds[index]
-			local picked = button.choiceId == selected
-			button.picked = picked
-			if picked then
-				Paint(button, 0.32, 0.22, 0.08, 1, 0.95, 0.78, 0.35, 1)
-				button.label:SetTextColor(1, 0.93, 0.72)
-			else
-				Paint(button, 0.14, 0.1, 0.2, 1, 0.45, 0.35, 0.62, 1)
-				button.label:SetTextColor(0.86, 0.82, 0.94)
-			end
+		if panel.spellBar.refreshSound then
+			panel.spellBar.refreshSound()
 		end
 	end
 
@@ -12746,14 +13773,7 @@ local function CreatePanel()
 	testButton.label:SetPoint("CENTER")
 	testButton.label:SetText("Test")
 	testButton:SetScript("OnClick", function()
-		local spellID
-		if db and type(db.talents) == "table" then
-			for key in pairs(db.talents) do
-				spellID = key
-				break
-			end
-		end
-		PlayTalent(spellID, true)
+		PlayTalent(LockRemindersEditedTalent(), true)
 	end)
 	testButton:SetScript("OnEnter", function(self)
 		self:SetBackdropColor(0.28, 0.2, 0.42, 1)
@@ -12761,116 +13781,179 @@ local function CreatePanel()
 	testButton:SetScript("OnLeave", function(self)
 		self:SetBackdropColor(0.14, 0.1, 0.2, 1)
 	end)
+	talentBar.glow:ClearAllPoints()
+	talentBar.glow:SetPoint("LEFT", testButton, "RIGHT", 12, 0)
 
-	local function choiceButton(text, x, y)
-		local button = CreateFrame("Button", nil, talentBar, "BackdropTemplate")
-		button:SetSize(164, 24)
-		button:SetPoint("TOPLEFT", x, y)
-		Paint(button, 0.14, 0.1, 0.2, 1, 0.45, 0.35, 0.62, 1)
-		button.label = button:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		button.label:SetPoint("CENTER")
-		button.label:SetText(text)
-		button:SetScript("OnEnter", function(self)
-			if not self.picked then
-				self:SetBackdropColor(0.24, 0.16, 0.34, 1)
-			end
-		end)
-		button:SetScript("OnLeave", function(self)
-			if self.picked then
-				self:SetBackdropColor(0.32, 0.22, 0.08, 1)
-			else
-				self:SetBackdropColor(0.14, 0.1, 0.2, 1)
-			end
-		end)
-		return button
-	end
-
-	local function markChoices(buttons, selected)
-		for index = 1, #buttons do
-			local picked = buttons[index].choiceId == selected
-			buttons[index].picked = picked
-			if picked then
-				Paint(buttons[index], 0.32, 0.22, 0.08, 1, 0.95, 0.78, 0.35, 1)
-				buttons[index].label:SetTextColor(1, 0.93, 0.72)
-			else
-				Paint(buttons[index], 0.14, 0.1, 0.2, 1, 0.45, 0.35, 0.62, 1)
-				buttons[index].label:SetTextColor(0.86, 0.82, 0.94)
-			end
+	holdLabel:SetText("Show")
+	local durationButton
+	talentBar.refreshDuration, durationButton = LockRemindersChoiceMenu(talentBar, holdLabel, 8, {
+		{ "Seconds", "seconds" },
+		{ "Until the buff ends", "until" },
+	}, function()
+		return db.talentUntilEnd and "until" or "seconds"
+	end, function(id)
+		db.talentUntilEnd = id == "until"
+		if talentBar.refresh then
+			talentBar.refresh()
 		end
-	end
-
-	holdLabel:Hide()
-	local secondsButton = choiceButton("Seconds", 168, -4)
-	secondsButton:SetSize(84, 22)
-	secondsButton.choiceId = "seconds"
+	end, nil, 168)
 	holdMinus:ClearAllPoints()
-	holdMinus:SetPoint("LEFT", secondsButton, "RIGHT", 6, 0)
-	local untilButton = choiceButton("Until the buff ends", 348, -4)
-	untilButton:SetSize(168, 22)
-	untilButton.choiceId = "until"
-	secondsButton:SetScript("OnClick", function()
-		db.talentUntilEnd = false
+	holdMinus:SetPoint("LEFT", durationButton, "RIGHT", 10, 0)
+
+	local procLabel = talentBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	procLabel:SetPoint("TOPLEFT", 4, -70)
+	procLabel:SetText("Proc")
+	procLabel:SetTextColor(0.9, 0.84, 1)
+	talentBar.refreshProc = LockRemindersChoiceMenu(talentBar, procLabel, 8, LockRemindersProcChoices, function()
+		local key = LockRemindersEditedTalent()
+		return key or "none"
+	end, function(id)
+		if id ~= "none" then
+			LockRemindersSelectedTalent = id
+		end
 		if talentBar.refresh then
 			talentBar.refresh()
 		end
-	end)
-	untilButton:SetScript("OnClick", function()
-		db.talentUntilEnd = true
-		if talentBar.refresh then
-			talentBar.refresh()
+		if id ~= "none" then
+			PlayTalent(id, true)
 		end
-	end)
+	end, nil, 220)
 
 	local effectLabel = talentBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	effectLabel:SetPoint("TOPLEFT", 4, -70)
-	effectLabel:SetText("Effect")
+	effectLabel:SetPoint("TOPLEFT", 4, -104)
+	effectLabel:SetText("Look")
 	effectLabel:SetTextColor(0.9, 0.84, 1)
-	local effectIds = { "icon", "ring", "star", "flash", "lozenge", "glow" }
-	local effectNames = { "Icon", "Ring", "Star", "Flash", "Diamond", "Glow" }
-	local effectButtons = {}
-	for index = 1, #effectIds do
-		local col = (index - 1) % 3
-		local row = math.floor((index - 1) / 3)
-		local button = choiceButton(effectNames[index], 4 + col * 172, -92 - row * 30)
-		button.choiceId = effectIds[index]
-		button:SetScript("OnClick", function(self)
-			db.talentStyle = self.choiceId
-			if talentFrame and (talentMoving or talentFrame:IsShown()) then
-				ApplyTalentFace()
-				talentFrame:Show()
-			end
-			if talentBar.refresh then
-				talentBar.refresh()
-			end
-		end)
-		effectButtons[#effectButtons + 1] = button
-	end
+	talentBar.refreshLook = LockRemindersChoiceMenu(talentBar, effectLabel, 8, LockRemindersProcLooks, function()
+		return LockRemindersTalentStyle(LockRemindersEditedTalent())
+	end, function(id)
+		local key = LockRemindersEditedTalent()
+		local entry = key and LockRemindersEnsureTalent(key)
+		if entry then
+			entry.style = id
+		end
+		db.talentStyle = id
+		if talentMoving and id ~= "icon" then
+			ShowTalentPreview(false)
+		end
+		PlayTalent(key, true)
+		Touch()
+		if talentBar.refresh then
+			talentBar.refresh()
+		end
+	end, nil, 160)
 
 	local soundLabel = talentBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	soundLabel:SetPoint("TOPLEFT", 4, -160)
+	soundLabel:SetPoint("TOPLEFT", 4, -138)
 	soundLabel:SetText("Sound")
 	soundLabel:SetTextColor(0.9, 0.84, 1)
-	local soundIds = { "none", "alarm", "bell", "level", "coin", "ping", "tell", "invite", "clock", "pulse", "drip", "knock", "chime", "bloom", "rise", "tick", "hum", "spark", "glass", "beep", "buzz", "chirp", "pop", "ding", "sweep", "clap", "warp" }
-	local soundNames = { "None", "Alarm", "Bell", "Level up", "Coin", "Ping", "Whisper", "Invite", "Clock", "Pulse", "Drip", "Knock", "Chime", "Bloom", "Rise", "Tick", "Hum", "Spark", "Glass", "Beep", "Buzz", "Chirp", "Pop", "Ding", "Sweep", "Clap", "Warp" }
-	local soundButtons = {}
-	for index = 1, #soundIds do
-		local col = (index - 1) % 4
-		local row = math.floor((index - 1) / 4)
-		local button = choiceButton(soundNames[index], 4 + col * 176, -182 - row * 30)
-		button.choiceId = soundIds[index]
-		button:SetScript("OnClick", function(self)
-			db.talentSound = self.choiceId
-			PlayAlertSound()
-			if talentBar.refresh then
-				talentBar.refresh()
-			end
-		end)
-		soundButtons[#soundButtons + 1] = button
-	end
+	talentBar.refreshSound = LockRemindersMakeSoundRow(talentBar, soundLabel, function()
+		return LockRemindersTalentSound(LockRemindersEditedTalent())
+	end, function(id)
+		local key = LockRemindersEditedTalent()
+		local entry = key and LockRemindersEnsureTalent(key)
+		if entry then
+			entry.sound = id
+		end
+		db.talentSound = id
+		Touch()
+	end)
 
 	talentBar.flashCheck = CreateFrame("Button", nil, talentBar, "BackdropTemplate")
 	talentBar.flashCheck:SetSize(22, 22)
-	talentBar.flashCheck:SetPoint("TOPLEFT", 4, -400)
+	local placeLabel = talentBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	placeLabel:SetPoint("TOPLEFT", 4, -172)
+	placeLabel:SetText("Place")
+	placeLabel:SetTextColor(0.9, 0.84, 1)
+	local placeXMinus = StepButton(talentBar, "-")
+	placeXMinus:SetPoint("LEFT", placeLabel, "RIGHT", 10, 0)
+	placeXMinus:SetScript("OnClick", function()
+		ChangeTalentPlace("x", -16)
+	end)
+	talentBar.placeX = talentBar:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	talentBar.placeX:SetPoint("LEFT", placeXMinus, "RIGHT", 6, 0)
+	talentBar.placeX:SetWidth(36)
+	talentBar.placeX:SetJustifyH("CENTER")
+	local placeXPlus = StepButton(talentBar, "+")
+	placeXPlus:SetPoint("LEFT", talentBar.placeX, "RIGHT", 2, 0)
+	placeXPlus:SetScript("OnClick", function()
+		ChangeTalentPlace("x", 16)
+	end)
+	local placeYLabel = talentBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	placeYLabel:SetPoint("LEFT", placeXPlus, "RIGHT", 16, 0)
+	placeYLabel:SetText("Y")
+	placeYLabel:SetTextColor(0.9, 0.84, 1)
+	local placeYMinus = StepButton(talentBar, "-")
+	placeYMinus:SetPoint("LEFT", placeYLabel, "RIGHT", 8, 0)
+	placeYMinus:SetScript("OnClick", function()
+		ChangeTalentPlace("y", -16)
+	end)
+	talentBar.placeY = talentBar:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	talentBar.placeY:SetPoint("LEFT", placeYMinus, "RIGHT", 6, 0)
+	talentBar.placeY:SetWidth(36)
+	talentBar.placeY:SetJustifyH("CENTER")
+	local placeYPlus = StepButton(talentBar, "+")
+	placeYPlus:SetPoint("LEFT", talentBar.placeY, "RIGHT", 2, 0)
+	placeYPlus:SetScript("OnClick", function()
+		ChangeTalentPlace("y", 16)
+	end)
+	local placeXLabel = talentBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	placeXLabel:SetPoint("LEFT", placeLabel, "RIGHT", 10, 0)
+	placeXLabel:SetText("X")
+	placeXLabel:SetTextColor(0.9, 0.84, 1)
+	placeXMinus:ClearAllPoints()
+	placeXMinus:SetPoint("LEFT", placeXLabel, "RIGHT", 8, 0)
+
+	local fadeLabel = talentBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	fadeLabel:SetPoint("TOPLEFT", 4, -206)
+	fadeLabel:SetText("Fade")
+	fadeLabel:SetTextColor(0.9, 0.84, 1)
+	local fadeMinus = StepButton(talentBar, "-")
+	fadeMinus:SetPoint("LEFT", fadeLabel, "RIGHT", 10, 0)
+	fadeMinus:SetScript("OnClick", function()
+		ChangeTalentFade(-0.1)
+	end)
+	talentBar.fadeText = talentBar:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	talentBar.fadeText:SetPoint("LEFT", fadeMinus, "RIGHT", 6, 0)
+	talentBar.fadeText:SetWidth(32)
+	talentBar.fadeText:SetJustifyH("CENTER")
+	local fadePlus = StepButton(talentBar, "+")
+	fadePlus:SetPoint("LEFT", talentBar.fadeText, "RIGHT", 2, 0)
+	fadePlus:SetScript("OnClick", function()
+		ChangeTalentFade(0.1)
+	end)
+	local function previewLook()
+		local key = LockRemindersEditedTalent()
+		local style = LockRemindersTalentStyle(key)
+		if style ~= "icon" then
+			LockRemindersShowTalentOrnament(style, key)
+		end
+	end
+	local function writeLookColor(which, red, green, blue)
+		local key = LockRemindersEditedTalent()
+		local entry = key and LockRemindersEnsureTalent(key)
+		local color = { r = red, g = green, b = blue }
+		if entry then
+			entry[which] = color
+		elseif db then
+			if which == "accent" then
+				db.talentLookAccent = color
+			else
+				db.talentLookColor = color
+			end
+		end
+	end
+	talentBar.colorSwatch = LockRemindersColorSwatch(talentBar, fadePlus, 16, "Color", function()
+		return LockRemindersTalentColor(LockRemindersEditedTalent(), "color")
+	end, function(red, green, blue)
+		writeLookColor("color", red, green, blue)
+	end, previewLook)
+	talentBar.accentSwatch = LockRemindersColorSwatch(talentBar, talentBar.colorSwatch, 12, "Accent", function()
+		return LockRemindersTalentColor(LockRemindersEditedTalent(), "accent")
+	end, function(red, green, blue)
+		writeLookColor("accent", red, green, blue)
+	end, previewLook)
+
+	talentBar.flashCheck:SetPoint("TOPLEFT", 4, -240)
 	Paint(talentBar.flashCheck, 0.14, 0.1, 0.2, 1, 0.58, 0.45, 0.82, 1)
 	talentBar.flashCheck.mark = talentBar.flashCheck:CreateTexture(nil, "OVERLAY")
 	talentBar.flashCheck.mark:SetPoint("CENTER")
@@ -12881,12 +13964,6 @@ local function CreatePanel()
 	talentBar.flashLabel:SetPoint("LEFT", talentBar.flashCheck, "RIGHT", 8, 0)
 	talentBar.flashLabel:SetText("Screen flash")
 	talentBar.flashLabel:SetTextColor(0.94, 0.9, 1)
-	talentBar.flashNote = talentBar:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-	talentBar.flashNote:SetPoint("TOPLEFT", talentBar.flashCheck, "BOTTOMLEFT", 0, -6)
-	talentBar.flashNote:SetWidth(500)
-	talentBar.flashNote:SetJustifyH("LEFT")
-	talentBar.flashNote:SetText("A flash across the whole screen when the buff activates. On by default.")
-	talentBar.flashNote:SetTextColor(0.7, 0.66, 0.78)
 	local function toggleFlash()
 		db.talentScreenFlash = not (db.talentScreenFlash ~= false)
 		if db.talentScreenFlash then
@@ -12908,13 +13985,40 @@ local function CreatePanel()
 		if not db then
 			return
 		end
-		markChoices(effectButtons, db.talentStyle or "icon")
-		markChoices(soundButtons, db.talentSound or "none")
+		if talentBar.refreshDuration then
+			talentBar.refreshDuration()
+		end
+		LockRemindersFillProcChoices()
+		if talentBar.refreshProc then
+			talentBar.refreshProc()
+		end
+		if talentBar.refreshLook then
+			talentBar.refreshLook()
+		end
+		if talentBar.refreshSound then
+			talentBar.refreshSound()
+		end
+		if talentBar.fadeText then
+			talentBar.fadeText:SetText(string.format("%.1f", LockRemindersTalentFade()))
+		end
+		if talentBar.placeX and talentBar.placeY then
+			local artX, artY = LockRemindersTalentArtOffset()
+			talentBar.placeX:SetText(tostring(artX))
+			talentBar.placeY:SetText(tostring(artY))
+		end
+		if talentBar.colorSwatch and talentBar.colorSwatch.refresh then
+			talentBar.colorSwatch.refresh()
+		end
+		if talentBar.accentSwatch and talentBar.accentSwatch.refresh then
+			talentBar.accentSwatch.refresh()
+		end
 		local untilEnd = db.talentUntilEnd and true or false
-		markChoices({ secondsButton, untilButton }, untilEnd and "until" or "seconds")
 		holdMinus:SetShown(not untilEnd)
 		talentHoldText:SetShown(not untilEnd)
 		holdPlus:SetShown(not untilEnd)
+		if talentMoveButton then
+			talentMoveButton:SetShown(LockRemindersTalentOnScreen())
+		end
 		local on = db.talentScreenFlash ~= false
 		talentBar.flashCheck.mark:SetShown(on)
 		if on then
@@ -13237,6 +14341,11 @@ local function Command(message)
 		db.talentPoint = { "CENTER", "CENTER", 0, 140 }
 		db.talentSize = 72
 		db.talentHold = 2.2
+		db.talentFade = 0.4
+		db.talentArtX = 0
+		db.talentArtY = 0
+		db.talentLookColor = nil
+		db.talentLookAccent = nil
 		db.missPlayer = false
 		db.missPet = false
 		db.missSpells = {}
@@ -13244,7 +14353,7 @@ local function Command(message)
 		db.missPoint = { "CENTER", "CENTER", 0, 260 }
 		db.missSize = 40
 		db.missHold = 2.2
-		db.missSound = "ping"
+		db.missSound = "zaps"
 		db.immuneAlert = true
 		db.funEnabled = false
 		db.funEmote = "CHICKEN"
@@ -13257,10 +14366,10 @@ local function Command(message)
 		db.speedTargetPoint = { "CENTER", "CENTER", 90, -160 }
 		db.healthAlert = true
 		db.healthPct = 35
-		db.healthSound = "pulse"
+		db.healthSound = "zaps"
 		db.manaAlert = true
 		db.manaPct = 25
-		db.manaSound = "drip"
+		db.manaSound = "chiji"
 		db.vitalSize = 32
 		db.vitalHold = 3
 		db.healthLabel = "LOW HEALTH"
@@ -13278,10 +14387,12 @@ local function Command(message)
 		db.soulSize = 48
 		db.soulLabel = "SOULSTONE"
 		db.soulPoint = { "CENTER", "CENTER", 0, 180 }
-		db.soulSound = "chime"
+		db.soulSound = "chiji"
 		db.soulTrack = true
 		db.soulTrackScope = { always = true, party = false, raid = false }
 		db.soulTrackSize = 100
+		db.soulTrackFont = 10
+		db.soulTrackFade = 92
 		db.soulFullName = true
 		db.soulTrackFrame = true
 		db.soulTrackPoint = { "CENTER", "CENTER", -280, 40 }
@@ -13444,11 +14555,36 @@ local function InitDB()
 	if type(db.talentHold) ~= "number" then
 		db.talentHold = 2.2
 	end
-	if type(db.talentStyle) ~= "string" then
-		db.talentStyle = "icon"
+	if type(db.talentFade) ~= "number" then
+		db.talentFade = 0.4
 	end
-	if type(db.talentSound) ~= "string" then
+	if type(db.talentArtX) ~= "number" then
+		db.talentArtX = 0
+	end
+	if type(db.talentArtY) ~= "number" then
+		db.talentArtY = 0
+	end
+	if type(db.talentStyle) ~= "string" then
+		db.talentStyle = "scythes"
+	else
+		db.talentStyle = LockRemindersMapLook(db.talentStyle)
+	end
+	if type(db.talentSound) ~= "string" or not LockRemindersKnownSound(db.talentSound) then
 		db.talentSound = "none"
+	end
+	for key, value in pairs(db.talents) do
+		if type(value) ~= "table" then
+			db.talents[key] = {
+				untilEnd = false,
+				style = db.talentStyle,
+				sound = LockRemindersKnownSound(db.talentSound) and db.talentSound or "none",
+			}
+		else
+			value.style = LockRemindersMapLook(value.style or db.talentStyle)
+			if not LockRemindersKnownSound(value.sound) then
+				value.sound = LockRemindersKnownSound(db.talentSound) and db.talentSound or "none"
+			end
+		end
 	end
 	if db.talentScreenFlash == nil then
 		db.talentScreenFlash = true
@@ -13480,8 +14616,8 @@ local function InitDB()
 	if type(db.missHold) ~= "number" then
 		db.missHold = 2.2
 	end
-	if type(db.missSound) ~= "string" then
-		db.missSound = "ping"
+	if type(db.missSound) ~= "string" or not LockRemindersKnownSound(db.missSound) then
+		db.missSound = "zaps"
 	end
 	if type(db.immuneAlert) ~= "boolean" then
 		db.immuneAlert = true
@@ -13516,8 +14652,8 @@ local function InitDB()
 	if type(db.healthPct) ~= "number" then
 		db.healthPct = 35
 	end
-	if type(db.healthSound) ~= "string" then
-		db.healthSound = "pulse"
+	if type(db.healthSound) ~= "string" or not LockRemindersKnownSound(db.healthSound) then
+		db.healthSound = "zaps"
 	end
 	if type(db.manaAlert) ~= "boolean" then
 		db.manaAlert = true
@@ -13525,8 +14661,8 @@ local function InitDB()
 	if type(db.manaPct) ~= "number" then
 		db.manaPct = 25
 	end
-	if type(db.manaSound) ~= "string" then
-		db.manaSound = "drip"
+	if type(db.manaSound) ~= "string" or not LockRemindersKnownSound(db.manaSound) then
+		db.manaSound = "chiji"
 	end
 	if type(db.vitalSize) ~= "number" then
 		db.vitalSize = 32
@@ -13561,8 +14697,8 @@ local function InitDB()
 	if type(db.soulPoint) ~= "table" then
 		db.soulPoint = { "CENTER", "CENTER", 0, 180 }
 	end
-	if type(db.soulSound) ~= "string" then
-		db.soulSound = "chime"
+	if type(db.soulSound) ~= "string" or not LockRemindersKnownSound(db.soulSound) then
+		db.soulSound = "chiji"
 	end
 	if type(db.soulTrack) ~= "boolean" then
 		db.soulTrack = true
@@ -13573,6 +14709,12 @@ local function InitDB()
 	end
 	if type(db.soulTrackSize) ~= "number" then
 		db.soulTrackSize = 100
+	end
+	if type(db.soulTrackFont) ~= "number" then
+		db.soulTrackFont = 10
+	end
+	if type(db.soulTrackFade) ~= "number" then
+		db.soulTrackFade = 92
 	end
 	if type(db.soulFullName) ~= "boolean" then
 		db.soulFullName = true
@@ -13890,6 +15032,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
 		return
 	end
 	if event == "PLAYER_TALENT_UPDATE" or event == "SPELLS_CHANGED" or event == "SPELL_DATA_LOAD_RESULT" then
+		pcall(LockRemindersSyncSoulClick)
 		pcall(LockRemindersCacheMissNames)
 		InvalidateSpellbook()
 		if UpdateListNow then
@@ -13957,6 +15100,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
 	if event == "PLAYER_REGEN_DISABLED" then
 		WatchCombatAlerts()
 	elseif event == "PLAYER_REGEN_ENABLED" then
+		pcall(LockRemindersSyncSoulClick)
 		if events.combatTicker then
 			events.combatTicker:Cancel()
 			events.combatTicker = nil
