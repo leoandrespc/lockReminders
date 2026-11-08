@@ -67,7 +67,7 @@ local talentFrame
 local foodFrame
 LockRemindersMiss = { moving = false, casts = {} }
 LockRemindersCD = { moving = false, icons = {}, states = {}, order = {} }
-LockRemindersMisc = { speedMoving = false, vitalMoving = false, healthDown = false, manaDown = false }
+LockRemindersMisc = { speedMoving = false }
 LockRemindersSoul = { moving = false, trackMoving = false, missing = false, rows = {} }
 LockRemindersSoulCast = {
 	[693] = true, [20752] = true, [20755] = true, [20756] = true, [20757] = true, [27238] = true, [47884] = true,
@@ -1243,6 +1243,17 @@ function LockRemindersFitEvenGlow(glow, icon, size, field)
 		return
 	end
 	local thick = LockRemindersGlowThick(size, field)
+	if thick <= 0 then
+		glow.quiet = true
+		if glow.ag then
+			glow.ag:Stop()
+		end
+		glow:Hide()
+		glow.plate:Hide()
+		return
+	end
+	glow:Show()
+	glow.plate:Show()
 	glow:ClearAllPoints()
 	glow:SetPoint("TOPLEFT", icon, "TOPLEFT", -thick, thick)
 	glow:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", thick, -thick)
@@ -3819,6 +3830,7 @@ function LockRemindersRemoveCDSpell(spellID)
 	if LockRemindersCD.states then
 		LockRemindersCD.states[key] = nil
 	end
+	LockRemindersDropCDOrder(key)
 	Print("Removed from CD Manager.")
 	Touch()
 	pcall(LockRemindersCDLayout)
@@ -3849,9 +3861,134 @@ function LockRemindersRemoveCDItem(itemID)
 	if LockRemindersCD.states then
 		LockRemindersCD.states[key] = nil
 	end
+	LockRemindersDropCDOrder(key)
 	Print("Removed from CD Manager.")
 	Touch()
 	pcall(LockRemindersCDLayout)
+end
+
+function LockRemindersDropCDOrder(key)
+	if not db or type(db.cdOrder) ~= "table" or not key then
+		return
+	end
+	for index = #db.cdOrder, 1, -1 do
+		if db.cdOrder[index] == key then
+			table.remove(db.cdOrder, index)
+		end
+	end
+end
+
+function LockRemindersCDCatalog()
+	local list = {}
+	local seen = {}
+	if not db then
+		return list
+	end
+	if type(db.cdSpells) == "table" then
+		for raw in pairs(db.cdSpells) do
+			local spellID = tonumber(raw)
+			if spellID and not seen[spellID] and LockRemindersCDSpellSaved(spellID) then
+				seen[spellID] = true
+				list[#list + 1] = {
+					key = LockRemindersCDKey("spell", spellID),
+					icon = SpellIcon(spellID),
+					text = SpellName(spellID) or ("Spell " .. spellID),
+					spellID = spellID,
+				}
+			end
+		end
+	end
+	if type(db.cdItems) == "table" then
+		local seenItem = {}
+		for raw in pairs(db.cdItems) do
+			local itemID = tonumber(raw)
+			if itemID and not seenItem[itemID] and LockRemindersCDItemSaved(itemID) then
+				seenItem[itemID] = true
+				list[#list + 1] = {
+					key = LockRemindersCDKey("item", itemID),
+					icon = ItemIcon(itemID) or 134400,
+					text = ItemName(itemID) or ("Item " .. itemID),
+					itemID = itemID,
+				}
+			end
+		end
+	end
+	return list
+end
+
+function LockRemindersSyncCDOrder(list)
+	list = list or LockRemindersCDCatalog()
+	if type(db.cdOrder) ~= "table" then
+		db.cdOrder = {}
+	end
+	local known = {}
+	for index = 1, #list do
+		known[list[index].key] = true
+	end
+	local kept = {}
+	local seen = {}
+	for index = 1, #db.cdOrder do
+		local key = db.cdOrder[index]
+		if type(key) == "string" and known[key] and not seen[key] then
+			seen[key] = true
+			kept[#kept + 1] = key
+		end
+	end
+	for index = 1, #list do
+		if not seen[list[index].key] then
+			kept[#kept + 1] = list[index].key
+		end
+	end
+	db.cdOrder = kept
+	return list
+end
+
+function LockRemindersSortedCDs()
+	local list = LockRemindersSyncCDOrder()
+	local rank = {}
+	for index = 1, #db.cdOrder do
+		rank[db.cdOrder[index]] = index
+	end
+	table.sort(list, function(a, b)
+		local ra = rank[a.key] or 9999
+		local rb = rank[b.key] or 9999
+		if ra == rb then
+			return tostring(a.text or "") < tostring(b.text or "")
+		end
+		return ra < rb
+	end)
+	return list
+end
+
+function LockRemindersMoveCD(key, newIndex)
+	local list = LockRemindersSortedCDs()
+	local order = db.cdOrder
+	local old
+	for index = 1, #order do
+		if order[index] == key then
+			old = index
+			break
+		end
+	end
+	if not old or newIndex < 1 or newIndex > #order or newIndex == old then
+		return
+	end
+	table.remove(order, old)
+	table.insert(order, newIndex, key)
+	pcall(LockRemindersCDLayout)
+	LockRemindersShowCDOrder(false)
+end
+
+function LockRemindersCDOrderRank()
+	local rank = {}
+	if not db then
+		return rank
+	end
+	LockRemindersSyncCDOrder()
+	for index = 1, #db.cdOrder do
+		rank[db.cdOrder[index]] = index
+	end
+	return rank
 end
 
 function LockRemindersCDSpellWorth(spellID)
@@ -3963,7 +4100,19 @@ function LockRemindersCollectCDManager(query, typedID, spellLink)
 			end
 		end
 	end
-	SortByName(saved)
+	do
+		local orderRank = LockRemindersCDOrderRank()
+		table.sort(saved, function(a, b)
+			local ka = a.spellID and LockRemindersCDKey("spell", a.spellID) or LockRemindersCDKey("item", a.itemID)
+			local kb = b.spellID and LockRemindersCDKey("spell", b.spellID) or LockRemindersCDKey("item", b.itemID)
+			local ra = orderRank[ka] or 9999
+			local rb = orderRank[kb] or 9999
+			if ra ~= rb then
+				return ra < rb
+			end
+			return Normalize(a.name or "") < Normalize(b.name or "")
+		end)
+	end
 
 	local function offerSpell(info, into, sub, force)
 		if not info or not info.spellID or seenSpell[info.spellID] then
@@ -4377,8 +4526,6 @@ local function AcquireRow()
 	row.hit:SetScript("OnClick", function()
 		if row.entry and row.entry.select then
 			row.entry.select()
-		elseif row.entry and row.entry.action then
-			row.entry.action()
 		end
 	end)
 	local highlight = row.hit:CreateTexture(nil, "HIGHLIGHT")
@@ -4881,6 +5028,9 @@ ShowLayout = function(resetScroll)
 	if LockRemindersItemLayout then
 		LockRemindersItemLayout:Hide()
 	end
+	if LockRemindersCDOrderRoot then
+		LockRemindersCDOrderRoot:Hide()
+	end
 	EnsureLayout()
 	if not layoutRoot then
 		return
@@ -4963,6 +5113,9 @@ HideLayout = function()
 	end
 	if LockRemindersItemLayout then
 		LockRemindersItemLayout:Hide()
+	end
+	if LockRemindersCDOrderRoot then
+		LockRemindersCDOrderRoot:Hide()
 	end
 end
 
@@ -5694,6 +5847,163 @@ function LockRemindersShowItemLayout(resetScroll)
 	C_Timer.After(0, UpdateScrollMetrics)
 end
 
+function LockRemindersShowCDOrder(resetScroll)
+	if not scroll or not scrollChild or not db then
+		return
+	end
+	if activeTab ~= "alert" or not panel or (panel.alertModule or "powers") ~= "cds" then
+		return
+	end
+	if LockRemindersItemLayout then
+		LockRemindersItemLayout:Hide()
+	end
+	if layoutRoot then
+		layoutRoot:Hide()
+	end
+	local root = LockRemindersCDOrderRoot
+	if not root then
+		root = CreateFrame("Frame", nil, scrollChild)
+		root:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 0, 0)
+		root:SetPoint("TOPRIGHT", scrollChild, "TOPRIGHT", 0, 0)
+		root.rows = {}
+		local function makeSortChoice(label, mode, width)
+			local button = CreateFrame("Button", nil, root, "BackdropTemplate")
+			button:SetSize(width, 22)
+			button.choiceId = mode
+			button.label = button:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+			button.label:SetPoint("CENTER")
+			button.label:SetText(label)
+			button:SetScript("OnClick", function()
+				db.cdSortMode = mode
+				pcall(LockRemindersCDLayout)
+				LockRemindersShowCDOrder(false)
+			end)
+			return button
+		end
+		root.byTime = makeSortChoice("By time", "time", 84)
+		root.byTime:SetPoint("TOPLEFT", 8, -8)
+		root.byManual = makeSortChoice("Manual", "manual", 84)
+		root.byManual:SetPoint("LEFT", root.byTime, "RIGHT", 8, 0)
+		root.sortChoices = { root.byTime, root.byManual }
+		root.reset = CreateFrame("Button", nil, root, "BackdropTemplate")
+		root.reset:SetSize(108, 22)
+		root.reset:SetPoint("LEFT", root.byManual, "RIGHT", 8, 0)
+		Paint(root.reset, 0.14, 0.1, 0.2, 1, 0.58, 0.45, 0.82, 1)
+		root.reset.label = root.reset:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		root.reset.label:SetPoint("CENTER")
+		root.reset.label:SetText("Reset order")
+		root.reset:SetScript("OnClick", function()
+			db.cdOrder = {}
+			pcall(LockRemindersCDLayout)
+			LockRemindersShowCDOrder(false)
+			Print("Order reset.")
+		end)
+		root.reset:SetScript("OnEnter", function(self)
+			self:SetBackdropColor(0.28, 0.2, 0.42, 1)
+		end)
+		root.reset:SetScript("OnLeave", function(self)
+			self:SetBackdropColor(0.14, 0.1, 0.2, 1)
+		end)
+		root.title = root:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+		root.title:SetPoint("TOPLEFT", 8, -40)
+		root.title:SetText("Icon order")
+		root.title:SetTextColor(0.9, 0.82, 1)
+		root.hint = root:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		root.hint:SetPoint("TOPLEFT", 8, -60)
+		root.hint:SetWidth(420)
+		root.hint:SetJustifyH("LEFT")
+		root.hint:SetTextColor(0.75, 0.7, 0.84)
+		root.empty = root:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		root.empty:SetPoint("TOPLEFT", 8, -92)
+		root.empty:SetWidth(420)
+		root.empty:SetJustifyH("LEFT")
+		root.empty:SetText("Add a cooldown and you can set the order here.")
+		root.empty:SetTextColor(0.75, 0.7, 0.84)
+		root.empty:Hide()
+		LockRemindersCDOrderRoot = root
+	end
+	root:Show()
+	root:SetWidth(math.max(scroll:GetWidth(), 200))
+	local sortMode = db.cdSortMode == "manual" and "manual" or "time"
+	if root.sortChoices then
+		LockRemindersPaintChoiceRow(root.sortChoices, sortMode)
+	end
+	if root.hint then
+		if sortMode == "manual" then
+			root.hint:SetText("Icons follow this list exactly. Use Subir / Bajar to rearrange.")
+		else
+			root.hint:SetText("On cooldown, shortest time left shows first. This list breaks ties and ranks ready icons.")
+		end
+	end
+	local list = LockRemindersSortedCDs()
+	for index = 1, #list do
+		local row = root.rows[index]
+		if not row then
+			row = CreateFrame("Frame", nil, root)
+			row:SetHeight(32)
+			row.icon = row:CreateTexture(nil, "ARTWORK")
+			row.icon:SetSize(24, 24)
+			row.icon:SetPoint("LEFT", 4, 0)
+			row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+			row.down = StepButton(row, "Bajar")
+			row.down:SetSize(52, 22)
+			row.down:SetPoint("RIGHT", -4, 0)
+			row.up = StepButton(row, "Subir")
+			row.up:SetSize(52, 22)
+			row.up:SetPoint("RIGHT", row.down, "LEFT", -4, 0)
+			row.name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+			row.name:SetPoint("LEFT", row.icon, "RIGHT", 8, 0)
+			row.name:SetPoint("RIGHT", row.up, "LEFT", -8, 0)
+			row.name:SetJustifyH("LEFT")
+			row.name:SetWordWrap(false)
+			row.up:SetScript("OnClick", function()
+				if row.key and row.index and row.index > 1 then
+					LockRemindersMoveCD(row.key, row.index - 1)
+				end
+			end)
+			row.down:SetScript("OnClick", function()
+				if row.key and row.index then
+					LockRemindersMoveCD(row.key, row.index + 1)
+				end
+			end)
+			root.rows[index] = row
+		end
+		local entry = list[index]
+		row.key = entry.key
+		row.index = index
+		row.icon:SetTexture(entry.icon or 134400)
+		row.name:SetText(entry.text)
+		row:ClearAllPoints()
+		row:SetPoint("TOPLEFT", root, "TOPLEFT", 0, -(92 + (index - 1) * 34))
+		row:SetPoint("TOPRIGHT", root, "TOPRIGHT", 0, -(92 + (index - 1) * 34))
+		local canUp = index > 1
+		local canDown = index < #list
+		row.up:SetAlpha(canUp and 1 or 0.35)
+		row.down:SetAlpha(canDown and 1 or 0.35)
+		row.up:EnableMouse(canUp)
+		row.down:EnableMouse(canDown)
+		row:Show()
+	end
+	for index = #list + 1, #root.rows do
+		root.rows[index]:Hide()
+	end
+	local height = 120 + #list * 34
+	if #list == 0 then
+		root.empty:Show()
+		height = 140
+	else
+		root.empty:Hide()
+	end
+	root:SetHeight(height)
+	scrollChild:SetWidth(scroll:GetWidth())
+	scrollChild:SetHeight(height)
+	if resetScroll then
+		scroll:SetVerticalScroll(0)
+	end
+	UpdateScrollMetrics()
+	C_Timer.After(0, UpdateScrollMetrics)
+end
+
 local function RebuildList(resetScroll)
 	if not panel or not panel:IsShown() or not searchBox then
 		return
@@ -5703,6 +6013,9 @@ local function RebuildList(resetScroll)
 		local module = panel.alertModule or "powers"
 		if module == "food" then
 			HideLayout()
+			if LockRemindersCDOrderRoot then
+				LockRemindersCDOrderRoot:Hide()
+			end
 			ReleaseBrowser()
 			emptyLabel:Hide()
 			scroll:Show()
@@ -5712,10 +6025,27 @@ local function RebuildList(resetScroll)
 			LockRemindersShowItemLayout(resetScroll)
 			return
 		end
+		if module == "cds" then
+			HideLayout()
+			if LockRemindersItemLayout then
+				LockRemindersItemLayout:Hide()
+			end
+			ReleaseBrowser()
+			emptyLabel:Hide()
+			scroll:Show()
+			if scrollBar then
+				scrollBar:Show()
+			end
+			LockRemindersShowCDOrder(resetScroll)
+			return
+		end
 		if module ~= "powers" then
 			HideLayout()
 			if LockRemindersItemLayout then
 				LockRemindersItemLayout:Hide()
+			end
+			if LockRemindersCDOrderRoot then
+				LockRemindersCDOrderRoot:Hide()
 			end
 			ReleaseBrowser()
 			emptyLabel:Hide()
@@ -5724,6 +6054,9 @@ local function RebuildList(resetScroll)
 				scrollBar:Hide()
 			end
 			return
+		end
+		if LockRemindersCDOrderRoot then
+			LockRemindersCDOrderRoot:Hide()
 		end
 		ReleaseBrowser()
 		emptyLabel:Hide()
@@ -5964,7 +6297,7 @@ local function UpdateTalentChrome()
 	local showMisc = activeTab == "misc"
 	local showSoul = activeTab == "soul"
 	local showFun = activeTab == "fun"
-	local hideList = (activeTab == "alert" and module ~= "powers" and module ~= "food") or showMisc or showSoul or showFun
+	local hideList = (activeTab == "alert" and module ~= "powers" and module ~= "food" and module ~= "cds") or showMisc or showSoul or showFun
 	if panel and panel.miscBar then
 		panel.miscBar:SetShown(showMisc)
 		if showMisc then
@@ -5988,7 +6321,13 @@ local function UpdateTalentChrome()
 	end
 	local listTop = -180
 	if activeTab == "alert" then
-		listTop = module == "food" and -160 or -88
+		if module == "food" then
+			listTop = -160
+		elseif module == "cds" then
+			listTop = -330
+		else
+			listTop = -88
+		end
 	end
 	scroll:ClearAllPoints()
 	scroll:SetPoint("TOPLEFT", 14, listTop)
@@ -9155,17 +9494,11 @@ function LockRemindersCDTriggerFlash(icon)
 	if mode == "screen" or mode == "both" then
 		LockRemindersPlayCDScreenFlash()
 	end
-	if (mode == "icon" or mode == "both") and icon then
-		if icon.flashAg then
-			icon.flashTex:Show()
-			icon.flashAg:Stop()
-			icon.flashAg:Play()
-		end
-		if icon.intro then
-			icon:SetScale(1)
-			icon.intro:Stop()
-			icon.intro:Play()
-		end
+	-- Soft white flash only — no bounce/scale (that read as blurry pop).
+	if (mode == "icon" or mode == "both") and icon and icon.flashAg then
+		icon.flashTex:Show()
+		icon.flashAg:Stop()
+		icon.flashAg:Play()
 	end
 end
 
@@ -9360,6 +9693,7 @@ function LockRemindersCDMarkCooling(state, left, duration, start)
 	state.start = start
 	state.readyUntil = nil
 	state.fading = nil
+	state.slotLocked = nil
 	state.misses = 0
 	if was ~= "cooling" then
 		state.pulse = true
@@ -9371,15 +9705,21 @@ function LockRemindersCDMarkReady(state)
 		return
 	end
 	local was = state.mode
-	state.mode = "ready"
+	-- Skip READY text hold — go straight to leave fade in place.
+	state.mode = "out"
 	state.left = nil
 	state.duration = nil
 	state.start = nil
 	state.fading = nil
+	state.pulse = nil
+	state.flash = nil
 	state.misses = 0
-	state.readyUntil = GetTime() + LockRemindersCDHold()
+	state.readyUntil = nil
+	state.slotLocked = true
+	if type(state.slotIndex) ~= "number" then
+		state.slotIndex = 0
+	end
 	if was == "cooling" then
-		state.flash = true
 		LockRemindersPlaySoundId(db and db.cdSound or "chiji")
 	end
 end
@@ -9472,7 +9812,14 @@ function LockRemindersCDAcquireIcon(index)
 	icon.glow = LockRemindersMakeEvenGlow(icon)
 	icon.texture = icon:CreateTexture(nil, "ARTWORK")
 	icon.texture:SetAllPoints()
-	icon.texture:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+	-- Mild crop only; heavy crop + round mask looked soft/low-res.
+	icon.texture:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+	if icon.texture.SetSnapToPixelGrid then
+		pcall(icon.texture.SetSnapToPixelGrid, icon.texture, false)
+	end
+	if icon.texture.SetTexelSnappingPolicy and Enum and Enum.TexelSnappingPolicy then
+		pcall(icon.texture.SetTexelSnappingPolicy, icon.texture, Enum.TexelSnappingPolicy.Off)
+	end
 	LockRemindersRoundIcon(icon.texture)
 	icon.shade = icon:CreateTexture(nil, "ARTWORK", nil, 5)
 	icon.shade:SetTexture("Interface\\Buttons\\WHITE8x8")
@@ -9497,61 +9844,41 @@ function LockRemindersCDAcquireIcon(index)
 	icon.ready:SetShadowColor(0, 0, 0, 1)
 	icon.ready:SetShadowOffset(1, -1)
 	icon.ready:Hide()
-	local outro = icon:CreateAnimationGroup()
-	local outroFade = outro:CreateAnimation("Alpha")
-	outroFade:SetFromAlpha(1)
-	outroFade:SetToAlpha(0)
-	outroFade:SetDuration(0.42)
-	outroFade:SetSmoothing("IN")
-	local outroGrow = outro:CreateAnimation("Scale")
-	outroGrow:SetScale(1.45, 1.45)
-	outroGrow:SetOrigin("CENTER", 0, 0)
-	outroGrow:SetDuration(0.42)
-	outroGrow:SetSmoothing("IN")
-	outro:SetScript("OnFinished", function()
-		icon:SetAlpha(1)
-		icon:SetScale(1)
-		icon:Hide()
-		local key = icon.stateKey
-		if key and LockRemindersCD.states and LockRemindersCD.states[key] then
-			LockRemindersCD.states[key] = nil
-		end
-		icon.stateKey = nil
-		pcall(LockRemindersCDLayout)
-	end)
-	icon.outro = outro
+	-- Outro is driven by OnUpdate in LockRemindersCDStartOutro (layout-safe).
+	icon.outro = nil
 	icon.flashTex = icon:CreateTexture(nil, "OVERLAY", nil, 7)
 	icon.flashTex:SetTexture("Interface\\Buttons\\WHITE8x8")
 	icon.flashTex:SetBlendMode("ADD")
-	icon.flashTex:SetVertexColor(1, 1, 1, 0.9)
+	icon.flashTex:SetVertexColor(1, 1, 1, 0.75)
 	icon.flashTex:Hide()
 	local flashAg = icon:CreateAnimationGroup()
 	local flashIn = flashAg:CreateAnimation("Alpha")
-	flashIn:SetFromAlpha(0.95)
+	flashIn:SetFromAlpha(0.7)
 	flashIn:SetToAlpha(0)
-	flashIn:SetDuration(0.45)
+	flashIn:SetDuration(0.35)
 	flashIn:SetSmoothing("OUT")
 	flashAg:SetScript("OnPlay", function()
 		icon.flashTex:Show()
-		icon.flashTex:SetAlpha(0.95)
+		icon.flashTex:SetAlpha(0.7)
 	end)
 	flashAg:SetScript("OnFinished", function()
 		icon.flashTex:Hide()
 		icon.flashTex:SetAlpha(0)
 	end)
 	icon.flashAg = flashAg
+	-- Soft enter: fade in only (no bounce that softens the art).
 	local intro = icon:CreateAnimationGroup()
-	local grow = intro:CreateAnimation("Scale")
-	grow:SetScale(1.35, 1.35)
-	grow:SetDuration(0.12)
-	grow:SetOrder(1)
-	grow:SetSmoothing("OUT")
-	local settle = intro:CreateAnimation("Scale")
-	settle:SetScale(0.74, 0.74)
-	settle:SetDuration(0.14)
-	settle:SetOrder(2)
-	settle:SetSmoothing("OUT")
+	local introFade = intro:CreateAnimation("Alpha")
+	introFade:SetFromAlpha(0.2)
+	introFade:SetToAlpha(1)
+	introFade:SetDuration(0.22)
+	introFade:SetSmoothing("OUT")
+	intro:SetScript("OnPlay", function()
+		icon:SetScale(1)
+		icon:SetAlpha(0.2)
+	end)
 	intro:SetScript("OnFinished", function()
+		icon:SetAlpha(1)
 		icon:SetScale(1)
 	end)
 	icon.intro = intro
@@ -9559,15 +9886,114 @@ function LockRemindersCDAcquireIcon(index)
 	return icon
 end
 
+function LockRemindersCDPlaceIcon(icon, slotIndex, size, vertical, drift)
+	if not icon then
+		return
+	end
+	slotIndex = tonumber(slotIndex) or 0
+	if slotIndex < 0 then
+		slotIndex = 0
+	end
+	drift = tonumber(drift) or 0
+	local gap = LockRemindersCDPad()
+	local offset = slotIndex * (size + gap)
+	icon.layoutSlot = slotIndex
+	icon.layoutOffset = offset
+	icon:ClearAllPoints()
+	if vertical then
+		icon:SetPoint("TOPLEFT", LockRemindersCD.bar, "TOPLEFT", drift, -offset)
+	else
+		icon:SetPoint("LEFT", LockRemindersCD.bar, "LEFT", offset, drift)
+	end
+	icon:SetSize(size, size)
+end
+
+function LockRemindersCDStartOutro(icon, state)
+	if not icon or not state or icon.outroPlaying then
+		return
+	end
+	if icon.intro and icon.intro.Stop then
+		icon.intro:Stop()
+	end
+	if icon.flashAg and icon.flashAg:IsPlaying() then
+		icon.flashAg:Stop()
+	end
+	if icon.flashTex then
+		icon.flashTex:Hide()
+	end
+	if icon.glow then
+		icon.glow.quiet = true
+		if icon.glow.ag then
+			icon.glow.ag:Stop()
+		end
+		if icon.glow.plate then
+			icon.glow.plate:SetAlpha(0)
+		end
+	end
+	if icon.ready then
+		icon.ready:Hide()
+	end
+	state.fading = true
+	state.slotLocked = true
+	icon.outroPlaying = true
+	icon.outroKey = state.key
+	icon.stateKey = state.key
+	icon.pinnedSlot = state.slotIndex or icon.layoutSlot or 0
+	state.slotIndex = icon.pinnedSlot
+	icon.outroVertical = db and db.cdVertical == true
+	icon.outroSize = math.floor((LockRemindersCDIconSize() or 40) + 0.5)
+	icon:SetScale(1)
+	icon:SetAlpha(1)
+	-- Freeze exact pixels NOW so later layout pack cannot move this frame.
+	LockRemindersCDPlaceIcon(icon, icon.pinnedSlot, icon.outroSize, icon.outroVertical, 0)
+	icon:SetFrameLevel((LockRemindersCD.bar and LockRemindersCD.bar:GetFrameLevel() or 1) + 50)
+	icon:Show()
+	local start = GetTime()
+	local duration = 0.55
+	icon:SetScript("OnUpdate", function(self)
+		local t = (GetTime() - start) / duration
+		if t >= 1 then
+			self:SetScript("OnUpdate", nil)
+			self:SetAlpha(1)
+			self:SetScale(1)
+			self:Hide()
+			self.outroPlaying = nil
+			local key = self.outroKey or self.stateKey
+			self.outroKey = nil
+			self.stateKey = nil
+			self.pinnedSlot = nil
+			if key and LockRemindersCD.states and LockRemindersCD.states[key] then
+				LockRemindersCD.states[key] = nil
+			end
+			pcall(LockRemindersCDLayout)
+			return
+		end
+		-- Smoothstep ease — fade + tiny shrink in place (no slide/bounce).
+		local ease = t * t * (3 - 2 * t)
+		local alpha = 1 - ease
+		if alpha < 0 then
+			alpha = 0
+		end
+		self:SetAlpha(alpha)
+		self:SetScale(1 - 0.08 * ease)
+	end)
+end
+
 function LockRemindersCDPaintIcon(icon, state, size)
 	if not icon or not state then
 		return
 	end
+	if icon.outroPlaying then
+		return
+	end
 	icon.stateKey = state.key
+	size = math.floor((tonumber(size) or 40) + 0.5)
 	icon:SetSize(size, size)
-	icon.texture:SetSize(size - 4, size - 4)
+	-- Full-size art so Spacing 0 puts icons flush (the old size-4 inset left a gap).
+	icon.texture:SetSize(size, size)
 	icon.texture:ClearAllPoints()
 	icon.texture:SetPoint("CENTER")
+	icon.texture:SetTexCoord(0.07, 0.93, 0.07, 0.93)
 	icon.texture:SetTexture(state.icon or 136235)
 	LockRemindersRoundIcon(icon.texture)
 	icon.shade:ClearAllPoints()
@@ -9612,14 +10038,17 @@ function LockRemindersCDPaintIcon(icon, state, size)
 	else
 		red, green, blue = LockRemindersReadGlow("cdGlow", 0.45, 0.75, 1)
 	end
-	LockRemindersFitEvenGlow(icon.glow, icon.texture, size - 4, "cdGlowSize")
-	LockRemindersTintEvenGlow(icon.glow, red, green, blue)
+	local border = LockRemindersGlowThick(size, "cdGlowSize")
+	LockRemindersFitEvenGlow(icon.glow, icon.texture, size, "cdGlowSize")
+	if border > 0 then
+		LockRemindersTintEvenGlow(icon.glow, red, green, blue)
+	end
 	if cooling then
 		icon.glow.quiet = true
 		if icon.glow.ag then
 			icon.glow.ag:Stop()
 		end
-		if icon.glow.plate then
+		if border > 0 and icon.glow.plate then
 			icon.glow.plate:SetAlpha(0.72)
 		end
 		local left = state.left or 0
@@ -9631,47 +10060,46 @@ function LockRemindersCDPaintIcon(icon, state, size)
 		icon.text:Show()
 		icon.ready:Hide()
 	else
-		icon.glow.quiet = nil
-		if icon.glow.ag and not icon.glow.ag:IsPlaying() and state.mode ~= "out" then
-			icon.glow.ag:Play()
+		if icon.glow and icon.glow.ag then
+			icon.glow.ag:Stop()
+		end
+		if border > 0 then
+			icon.glow.quiet = nil
 		end
 		icon.shade:Hide()
 		icon.text:Hide()
-		local label = LockRemindersClassLabel("cdLabel", "READY")
-		icon.ready:SetText(label)
-		icon.ready:SetShown(label ~= "")
-		icon.ready:SetTextColor(red, green, blue)
+		-- No READY / !! label — finished CDs leave with the fade only.
+		icon.ready:Hide()
 	end
 	if state.mode == "out" then
-		if not state.fading and icon.outro then
-			state.fading = true
-			if icon.intro and icon.intro:IsPlaying() then
-				icon.intro:Stop()
-			end
-			if icon.flashAg and icon.flashAg:IsPlaying() then
-				icon.flashAg:Stop()
-			end
-			icon:SetAlpha(1)
-			icon:SetScale(1)
-			icon.outro:Stop()
-			icon.outro:Play()
-		end
-	elseif state.flash or state.pulse then
-		local doFlash = state.flash
-		state.flash = nil
-		state.pulse = nil
-		if doFlash then
-			LockRemindersCDTriggerFlash(icon)
-		elseif icon.intro then
-			icon:SetScale(1)
-			icon.intro:Stop()
-			icon.intro:Play()
-		end
-	end
-	if state.mode ~= "out" or not state.fading then
 		icon:SetAlpha(1)
+		icon:Show()
+		LockRemindersCDStartOutro(icon, state)
+		return
 	end
+	state.flash = nil
+	state.pulse = nil
+	icon:SetAlpha(1)
+	icon:SetScale(1)
 	icon:Show()
+end
+
+function LockRemindersCDTakeIcon(state, busy)
+	local icons = LockRemindersCD.icons
+	for index = 1, #icons do
+		local icon = icons[index]
+		if icon and not busy[icon] and icon.stateKey == state.key then
+			busy[icon] = true
+			return icon
+		end
+	end
+	for index = 1, math.max(#icons + 1, 8) do
+		local icon = LockRemindersCDAcquireIcon(index)
+		if icon and not busy[icon] and not icon.outroPlaying then
+			busy[icon] = true
+			return icon
+		end
+	end
 end
 
 function LockRemindersCDLayout()
@@ -9680,48 +10108,155 @@ function LockRemindersCDLayout()
 		return
 	end
 	local size = LockRemindersCDIconSize()
+	size = math.floor(size + 0.5)
 	local gap = LockRemindersCDPad()
+	local step = size + gap
+	if step < 1 then
+		step = 1
+	end
 	local vertical = db.cdVertical == true
-	local visible = {}
+	local cooling = {}
+	local locked = {}
+	local toFade = {}
 	local now = GetTime()
-	for key, state in pairs(LockRemindersCD.states) do
+	for _, state in pairs(LockRemindersCD.states) do
 		if state.mode == "cooling" then
 			if state.start and state.duration and not LockRemindersSecret(state.start) and not LockRemindersSecret(state.duration) then
 				state.left = state.start + state.duration - now
 			end
 			if not state.left or state.left <= 0 then
 				LockRemindersCDMarkReady(state)
+			elseif state.left <= 1.25 and type(state.slotIndex) == "number" then
+				-- Stop last-second by-time jumps that looked like a bounce.
+				state.slotLocked = true
 			end
 		end
 		if state.mode == "ready" then
 			if not state.readyUntil or now >= state.readyUntil then
 				state.mode = "out"
-				state.fading = nil
-				visible[#visible + 1] = state
+				toFade[#toFade + 1] = state
 			else
-				visible[#visible + 1] = state
+				state.slotLocked = true
+				locked[#locked + 1] = state
 			end
 		elseif state.mode == "out" then
-			visible[#visible + 1] = state
+			if not state.fading then
+				toFade[#toFade + 1] = state
+			end
 		elseif state.mode == "cooling" then
-			visible[#visible + 1] = state
+			if state.slotLocked and type(state.slotIndex) == "number" then
+				locked[#locked + 1] = state
+			else
+				cooling[#cooling + 1] = state
+			end
 		end
 	end
-	table.sort(visible, function(a, b)
+	local orderRank = LockRemindersCDOrderRank()
+	local sortManual = db.cdSortMode == "manual"
+	table.sort(cooling, function(a, b)
+		if sortManual then
+			local ra = orderRank[a.key] or 9999
+			local rb = orderRank[b.key] or 9999
+			if ra ~= rb then
+				return ra < rb
+			end
+			return (a.name or "") < (b.name or "")
+		end
 		local la = a.left or 0
 		local lb = b.left or 0
-		local rank = { ready = 1, out = 2, cooling = 3 }
-		local ra = rank[a.mode] or 9
-		local rb = rank[b.mode] or 9
+		if la ~= lb then
+			return la < lb
+		end
+		local ra = orderRank[a.key] or 9999
+		local rb = orderRank[b.key] or 9999
 		if ra ~= rb then
 			return ra < rb
 		end
-		if a.mode == "cooling" and la ~= lb then
-			return la < lb
-		end
 		return (a.name or "") < (b.name or "")
 	end)
-	local count = #visible
+	local busy = {}
+	local occupied = {}
+	local fadingCount = 0
+	local maxSlot = -1
+	local function claimIndex(slot)
+		slot = tonumber(slot) or 0
+		if slot < 0 then
+			slot = 0
+		end
+		occupied[slot] = true
+		if slot > maxSlot then
+			maxSlot = slot
+		end
+		return slot
+	end
+	local function nextFreeIndex()
+		local slot = 0
+		while occupied[slot] do
+			slot = slot + 1
+		end
+		return claimIndex(slot)
+	end
+	-- 1) Reserve every immovable slot BEFORE packing cooling (fixes overlap).
+	for index = 1, #LockRemindersCD.icons do
+		local icon = LockRemindersCD.icons[index]
+		if icon and icon.outroPlaying then
+			busy[icon] = true
+			fadingCount = fadingCount + 1
+			claimIndex(icon.pinnedSlot or icon.layoutSlot or 0)
+		end
+	end
+	for index = 1, #toFade do
+		local state = toFade[index]
+		claimIndex(state.slotIndex or 0)
+	end
+	for index = 1, #locked do
+		local state = locked[index]
+		claimIndex(state.slotIndex or 0)
+	end
+	-- 2) Paint locked icons on their frozen slots.
+	for index = 1, #locked do
+		local state = locked[index]
+		local icon = LockRemindersCDTakeIcon(state, busy)
+		if icon then
+			local slot = state.slotIndex or 0
+			state.slotIndex = slot
+			state.slotLocked = true
+			LockRemindersCDPlaceIcon(icon, slot, size, vertical, 0)
+			LockRemindersCDPaintIcon(icon, state, size)
+		end
+	end
+	-- 3) Cooling only fills holes — never steals a ready/fading slot.
+	for index = 1, #cooling do
+		local state = cooling[index]
+		local icon = LockRemindersCDTakeIcon(state, busy)
+		if icon then
+			local slot = nextFreeIndex()
+			state.slotIndex = slot
+			state.slotLocked = nil
+			LockRemindersCDPlaceIcon(icon, slot, size, vertical, 0)
+			LockRemindersCDPaintIcon(icon, state, size)
+		end
+	end
+	-- 4) Start leave fades last, still on their reserved slot.
+	for index = 1, #toFade do
+		local state = toFade[index]
+		local icon = LockRemindersCDTakeIcon(state, busy)
+		if icon then
+			local slot = state.slotIndex or icon.layoutSlot or 0
+			state.slotIndex = slot
+			LockRemindersCDPlaceIcon(icon, slot, size, vertical, 0)
+			LockRemindersCDPaintIcon(icon, state, size)
+			fadingCount = fadingCount + 1
+		end
+	end
+	for index = 1, #LockRemindersCD.icons do
+		local icon = LockRemindersCD.icons[index]
+		if icon and not busy[icon] then
+			icon:Hide()
+			icon.stateKey = nil
+		end
+	end
+	local count = #cooling + #locked + fadingCount
 	local label = LockRemindersClassLabel("cdLabel", "READY")
 	local textSize = LockRemindersCDTextSize()
 	local sidePad = 4
@@ -9730,33 +10265,14 @@ function LockRemindersCDLayout()
 	elseif not vertical and label ~= "" then
 		sidePad = 18
 	end
-	for index = 1, math.max(count, #LockRemindersCD.icons) do
-		local icon = LockRemindersCD.icons[index]
-		if index <= count then
-			icon = LockRemindersCDAcquireIcon(index)
-			if icon then
-				icon:ClearAllPoints()
-				local offset = (index - 1) * (size + gap)
-				if vertical then
-					icon:SetPoint("TOPLEFT", bar, "TOPLEFT", 0, -offset)
-				else
-					icon:SetPoint("LEFT", bar, "LEFT", offset, 0)
-				end
-				LockRemindersCDPaintIcon(icon, visible[index], size)
-			end
-		elseif icon then
-			if not (icon.outro and icon.outro:IsPlaying()) then
-				icon:Hide()
-				icon.stateKey = nil
-			end
-		end
+	local span = 0
+	if count > 0 and maxSlot >= 0 then
+		span = maxSlot * step + size
 	end
 	if vertical then
-		local height = math.max(size, count * size + math.max(0, count - 1) * gap)
-		bar:SetSize(size + 8 + sidePad, height + 4)
+		bar:SetSize(size + 8 + sidePad, math.max(size, span) + 4)
 	else
-		local width = math.max(size, count * size + math.max(0, count - 1) * gap)
-		bar:SetSize(width + 8, size + sidePad)
+		bar:SetSize(math.max(size, span) + 8, size + sidePad)
 	end
 	if count > 0 or LockRemindersCD.moving then
 		bar:Show()
@@ -9843,7 +10359,13 @@ function LockRemindersChangeCDPad(delta)
 	if not db then
 		return
 	end
-	db.cdPad = LockRemindersCDPad() + delta
+	local pad = LockRemindersCDPad() + delta
+	if pad < 0 then
+		pad = 0
+	elseif pad > 32 then
+		pad = 32
+	end
+	db.cdPad = pad
 	LockRemindersApplyCDLook()
 	if UpdateTalentChrome then
 		UpdateTalentChrome()
@@ -10089,34 +10611,47 @@ function LockRemindersNoteCDCast(unit, arg2, arg3, arg4)
 	C_Timer.After(0.25, stamp)
 end
 
-function LockRemindersUnitPercent(current, max)
-	if LockRemindersSecret(current) or LockRemindersSecret(max) then
+function LockRemindersSpeedBase()
+	local base = tonumber(BASE_MOVEMENT_SPEED)
+	if not base or base <= 0 then
+		base = 7
+	end
+	return base
+end
+
+function LockRemindersSpeedToPercent(yards)
+	yards = tonumber(yards)
+	if not yards or yards < 0 then
 		return nil
 	end
-	current = tonumber(current)
-	max = tonumber(max)
-	if not current or not max or max <= 0 then
-		return nil
-	end
-	return math.floor(current / max * 100 + 0.5)
+	return math.floor(yards / LockRemindersSpeedBase() * 100 + 0.5)
 end
 
 function LockRemindersSpeedPercent(unit)
 	if not unit or not UnitExists or not UnitExists(unit) or not GetUnitSpeed then
 		return nil
 	end
-	local ok, current = pcall(GetUnitSpeed, unit)
-	if not ok or current == nil or LockRemindersSecret(current) then
+	-- GetUnitSpeed returns current, run, flight, swim. Forever can zero "current"
+	-- on player while dead; callers may fall back to run when motion says moving.
+	local ok, current, runSpeed, flightSpeed, swimSpeed = pcall(GetUnitSpeed, unit)
+	if not ok then
 		return nil
 	end
-	current = tonumber(current)
-	if not current then
-		return nil
+	local function take(value)
+		if value == nil or LockRemindersSecret(value) then
+			return nil
+		end
+		value = tonumber(value)
+		if not value or value < 0 then
+			return nil
+		end
+		return LockRemindersSpeedToPercent(value)
 	end
-	if current < 0 then
-		current = 0
+	local currentPct = take(current)
+	if currentPct ~= nil and currentPct > 0 then
+		return currentPct
 	end
-	return math.floor(current / 7 * 100 + 0.5)
+	return currentPct, take(runSpeed), take(flightSpeed), take(swimSpeed)
 end
 
 function LockRemindersPlayerIsMoving()
@@ -10163,7 +10698,7 @@ function LockRemindersSpeedFromMotion(unit)
 	if yards < 0.02 then
 		return 0
 	end
-	return math.floor(yards / dt / 7 * 100 + 0.5)
+	return LockRemindersSpeedToPercent(yards / dt)
 end
 
 function LockRemindersCalmSpeed(percent)
@@ -10176,127 +10711,55 @@ function LockRemindersCalmSpeed(percent)
 	return percent
 end
 
-function LockRemindersReadSpeed(unit)
-	local api = LockRemindersSpeedPercent(unit)
-	local motion = LockRemindersSpeedFromMotion(unit)
-	if unit == "player" and LockRemindersPlayerIsMoving() == false then
-		return 0
+function LockRemindersPlayerIsGhost()
+	if not UnitIsDeadOrGhost then
+		return false
 	end
-	if motion == 0 and not (unit == "player" and LockRemindersPlayerIsMoving() == true) then
-		return 0
+	local ok, dead = pcall(UnitIsDeadOrGhost, "player")
+	return ok and dead == true and not LockRemindersSecret(dead)
+end
+
+function LockRemindersReadSpeed(unit)
+	local api, runPct, flightPct, swimPct = LockRemindersSpeedPercent(unit)
+	local motion = LockRemindersSpeedFromMotion(unit)
+	local ghost = unit == "player" and LockRemindersPlayerIsGhost()
+	-- Forever often zeros GetUnitSpeed("player") current while dead, but the same
+	-- unit as "target" (self-target) still returns the real current speed.
+	if ghost and (api == nil or api <= 0) and UnitExists and UnitExists("target") and UnitIsUnit then
+		local ok, same = pcall(UnitIsUnit, "target", "player")
+		if ok and same == true and not LockRemindersSecret(same) then
+			local asTarget = LockRemindersSpeedPercent("target")
+			if asTarget ~= nil and asTarget > 0 then
+				api = asTarget
+			end
+		end
 	end
 	if api ~= nil and api > 0 then
 		return LockRemindersCalmSpeed(api)
 	end
-	return LockRemindersCalmSpeed(motion)
-end
-
-function LockRemindersScaledPercent(kind)
-	if not CurveConstants or not CurveConstants.ScaleTo100 then
+	-- Ghost current can stay 0 while moving: if motion (or swim/fly) says we move,
+	-- show the matching mode speed (usually run = 125% as ghost).
+	if ghost then
+		local moving = (type(motion) == "number" and motion > 0) or LockRemindersPlayerIsMoving() == true
+		if moving then
+			local mode = swimPct or flightPct or runPct or motion
+			if type(mode) == "number" and mode > 0 then
+				return LockRemindersCalmSpeed(mode)
+			end
+		end
+		if type(motion) == "number" and motion > 0 then
+			return LockRemindersCalmSpeed(motion)
+		end
 		return nil
 	end
-	local function take(ok, value)
-		if not ok or value == nil or LockRemindersSecret(value) then
-			return nil
-		end
-		value = tonumber(value)
-		if not value then
-			return nil
-		end
-		if value > 0 and value <= 1 then
-			value = value * 100
-		end
-		return math.floor(value + 0.5)
+	-- Alive: IsPlayerMoving reliably means stopped -> "--".
+	if unit == "player" and LockRemindersPlayerIsMoving() == false then
+		return nil
 	end
-	if kind == "health" and UnitHealthPercent then
-		local ok, value = pcall(UnitHealthPercent, "player", true, CurveConstants.ScaleTo100)
-		local percent = take(ok, value)
-		if percent ~= nil then
-			return percent
-		end
-		ok, value = pcall(UnitHealthPercent, "player", false, CurveConstants.ScaleTo100)
-		return take(ok, value)
+	if type(motion) == "number" and motion > 0 then
+		return LockRemindersCalmSpeed(motion)
 	end
-	if kind == "mana" and UnitPowerPercent then
-		local power = LockRemindersPlayerPower()
-		local ok, value = pcall(UnitPowerPercent, "player", power, true, CurveConstants.ScaleTo100)
-		local percent = take(ok, value)
-		if percent ~= nil then
-			return percent
-		end
-		ok, value = pcall(UnitPowerPercent, "player", power, false, CurveConstants.ScaleTo100)
-		return take(ok, value)
-	end
-end
-
-function LockRemindersHealthPercent()
-	if UnitHealth and UnitHealthMax then
-		local okCurrent, current = pcall(UnitHealth, "player")
-		local okMax, max = pcall(UnitHealthMax, "player")
-		if okCurrent and okMax and not LockRemindersSecret(current) and not LockRemindersSecret(max) then
-			current = tonumber(current)
-			max = tonumber(max)
-			if current and max and max > 1 then
-				local percent = LockRemindersUnitPercent(current, max)
-				if percent ~= nil then
-					return percent
-				end
-			end
-		end
-	end
-	return LockRemindersScaledPercent("health")
-end
-
-function LockRemindersPlayerPower()
-	if UnitPowerType then
-		local ok, kind = pcall(UnitPowerType, "player")
-		if ok and type(kind) == "number" and not LockRemindersSecret(kind) then
-			return kind
-		end
-	end
-	return (Enum and Enum.PowerType and Enum.PowerType.Mana) or 0
-end
-
-function LockRemindersManaPercent()
-	local current, max
-	local power = LockRemindersPlayerPower()
-	local function take(value, total)
-		if LockRemindersSecret(value) or LockRemindersSecret(total) then
-			return
-		end
-		value = tonumber(value)
-		total = tonumber(total)
-		if not value or not total or total <= 1 then
-			return
-		end
-		current, max = value, total
-	end
-	if UnitPower and UnitPowerMax then
-		local okCurrent, value = pcall(UnitPower, "player", power)
-		local okMax, total = pcall(UnitPowerMax, "player", power)
-		if okCurrent and okMax then
-			take(value, total)
-		end
-		if current == nil then
-			okCurrent, value = pcall(UnitPower, "player")
-			okMax, total = pcall(UnitPowerMax, "player")
-			if okCurrent and okMax then
-				take(value, total)
-			end
-		end
-	end
-	if current == nil and UnitMana and UnitManaMax then
-		local okCurrent, value = pcall(UnitMana, "player")
-		local okMax, total = pcall(UnitManaMax, "player")
-		if okCurrent and okMax then
-			take(value, total)
-		end
-	end
-	local percent = LockRemindersUnitPercent(current, max)
-	if percent ~= nil then
-		return percent
-	end
-	return LockRemindersScaledPercent("mana")
+	return nil
 end
 
 function LockRemindersApplyNamedPoint(frame, key, fallback)
@@ -10339,11 +10802,14 @@ function LockRemindersApplySpeedLook()
 		font = "Fonts\\FRIZQT__.TTF"
 	end
 	frame.text:SetFont(font, size, "OUTLINE")
+	local red, green, blue = LockRemindersReadGlow("speedColor", 1, 0.96, 0.9)
+	frame.text:SetTextColor(red, green, blue)
 	local split = db.speedSplit == true
 	local width = split and math.max(72, math.floor(size * 4 + 16)) or math.max(128, math.floor(size * 8 + 28))
 	frame:SetSize(width, size + 18)
 	if frame.target and frame.target.text then
 		frame.target.text:SetFont(font, size, "OUTLINE")
+		frame.target.text:SetTextColor(red, green, blue)
 		frame.target:SetSize(width, size + 18)
 	end
 end
@@ -10363,6 +10829,8 @@ function LockRemindersUpdateSpeed()
 	local mine = LockRemindersReadSpeed("player")
 	if mine ~= nil then
 		frame.lastMine = mine
+	else
+		frame.lastMine = nil
 	end
 	local hasTarget = UnitExists and UnitExists("target")
 	local guid
@@ -10383,7 +10851,11 @@ function LockRemindersUpdateSpeed()
 		local theirs = LockRemindersReadSpeed("target")
 		if theirs ~= nil then
 			frame.lastTarget = theirs
+		else
+			frame.lastTarget = nil
 		end
+	else
+		frame.lastTarget = nil
 	end
 	local left = frame.lastMine and (frame.lastMine .. "%") or "--"
 	local right = frame.lastTarget and (frame.lastTarget .. "%") or "--"
@@ -10438,165 +10910,6 @@ function LockRemindersSetSpeedMove(on)
 	LockRemindersRefreshMisc()
 end
 
-function LockRemindersApplyVitalLook()
-	local frame = LockRemindersMisc.vital
-	if not frame or not db then
-		return
-	end
-	local size = tonumber(db.vitalSize) or 32
-	if size < 16 then
-		size = 16
-	elseif size > 64 then
-		size = 64
-	end
-	db.vitalSize = size
-	local font = frame.health:GetFont()
-	if type(font) ~= "string" or font == "" then
-		font = "Fonts\\FRIZQT__.TTF"
-	end
-	frame.health:SetFont(font, size, "OUTLINE")
-	frame.mana:SetFont(font, size, "OUTLINE")
-	frame.health:SetText(LockRemindersVitalLabel("health"))
-	frame.mana:SetText(LockRemindersVitalLabel("mana"))
-	local width = math.max(frame.health:GetStringWidth() or 0, frame.mana:GetStringWidth() or 0)
-	frame:SetSize(math.max(math.floor(size * 8 + 24), math.floor(width + size * 2)), math.floor(size * 2.6 + 16))
-	LockRemindersApplyVitalFace()
-end
-
-function LockRemindersVitalLabel(kind)
-	local text = db and (kind == "mana" and db.manaLabel or db.healthLabel)
-	if type(text) ~= "string" or text == "" then
-		return kind == "mana" and "LOW MANA" or "LOW HEALTH"
-	end
-	return text
-end
-
-function LockRemindersApplyVitalFace()
-	local frame = LockRemindersMisc.vital
-	if not frame then
-		return
-	end
-	if frame.ornament then
-		frame.ornament:Hide()
-	end
-	local style = db and db.vitalStyle or "none"
-	if frame.motionStyle ~= style then
-		frame.motionStyle = style
-		frame.motionT = 0
-	end
-end
-
-function LockRemindersAnchorVitalText(ox, oy)
-	local frame = LockRemindersMisc.vital
-	if not frame then
-		return
-	end
-	ox = ox or 0
-	oy = oy or 0
-	local healthLow = frame.health:IsShown()
-	local manaLow = frame.mana:IsShown()
-	frame.health:ClearAllPoints()
-	frame.mana:ClearAllPoints()
-	if healthLow and manaLow then
-		frame.health:SetPoint("TOP", frame, "TOP", ox, -4 + oy)
-		frame.mana:SetPoint("TOP", frame.health, "BOTTOM", 0, -2)
-	elseif healthLow then
-		frame.health:SetPoint("CENTER", frame, "CENTER", ox, oy)
-	elseif manaLow then
-		frame.mana:SetPoint("CENTER", frame, "CENTER", ox, oy)
-	end
-end
-
-function LockRemindersStepVitalMotion(frame, elapsed)
-	if not frame or not frame.health or not db then
-		return
-	end
-	if frame:IsShown() and not (frame.fade and frame.fade:IsPlaying()) then
-		frame:SetAlpha(1)
-		if (frame:GetScale() or 1) < 0.85 then
-			frame:SetScale(1)
-		end
-	end
-	local style = db.vitalStyle or "none"
-	local active = frame:IsShown() and not LockRemindersMisc.vitalMoving and (style == "pulse" or style == "shake" or style == "bounce" or style == "flash" or style == "pop")
-	if not active then
-		if frame.motionOn then
-			frame.motionOn = nil
-			frame.motionT = 0
-			local size = tonumber(db.vitalSize) or 32
-			local font = frame.health:GetFont()
-			if type(font) ~= "string" or font == "" then
-				font = "Fonts\\FRIZQT__.TTF"
-			end
-			frame.health:SetFont(font, size, "OUTLINE")
-			frame.mana:SetFont(font, size, "OUTLINE")
-			if not LockRemindersMisc.curveShown then
-				frame.health:SetAlpha(frame.health:IsShown() and 1 or 0)
-				frame.mana:SetAlpha(frame.mana:IsShown() and 1 or 0)
-			end
-			LockRemindersAnchorVitalText(0, 0)
-		end
-		return
-	end
-	frame.motionOn = true
-	frame.motionT = (frame.motionT or 0) + (elapsed or 0)
-	local t = frame.motionT
-	local size = tonumber(db.vitalSize) or 32
-	local scale, alpha, ox, oy = 1, 1, 0, 0
-	if style == "pulse" then
-		scale = 1 + 0.2 * math.sin(t * 7)
-	elseif style == "shake" then
-		ox = math.sin(t * 36) * 9
-	elseif style == "bounce" then
-		oy = math.abs(math.sin(t * 7)) * 18
-	elseif style == "flash" then
-		if LockRemindersMisc.curveShown then
-			scale = 1 + 0.14 * math.sin(t * 18)
-		else
-			alpha = 0.15 + 0.85 * (0.5 + 0.5 * math.sin(t * 18))
-		end
-	elseif style == "pop" then
-		local phase = t % 0.74
-		if phase < 0.14 then
-			scale = 1 + (phase / 0.14) * 0.55
-		elseif phase < 0.34 then
-			scale = 1.55 - ((phase - 0.14) / 0.2) * 0.63
-		else
-			scale = 0.92
-		end
-	end
-	local font = frame.health:GetFont()
-	if type(font) ~= "string" or font == "" then
-		font = "Fonts\\FRIZQT__.TTF"
-	end
-	local drawn = size * scale
-	if drawn < 12 then
-		drawn = 12
-	end
-	frame.health:SetFont(font, drawn, "OUTLINE")
-	frame.mana:SetFont(font, drawn, "OUTLINE")
-	if not LockRemindersMisc.curveShown then
-		frame.health:SetAlpha(frame.health:IsShown() and alpha or 0)
-		frame.mana:SetAlpha(frame.mana:IsShown() and alpha or 0)
-	end
-	LockRemindersAnchorVitalText(ox, oy)
-end
-
-function LockRemindersPlaceVitalText(healthLow, manaLow)
-	local frame = LockRemindersMisc.vital
-	if not frame then
-		return
-	end
-	frame.health:SetAlpha(1)
-	frame.mana:SetAlpha(1)
-	frame.health:SetText(LockRemindersVitalLabel("health"))
-	frame.mana:SetText(LockRemindersVitalLabel("mana"))
-	frame.health:SetShown(healthLow and true or false)
-	frame.mana:SetShown(manaLow and true or false)
-	LockRemindersAnchorVitalText(0, 0)
-	LockRemindersApplyVitalFace()
-end
-
 function LockRemindersAttachPop(frame, shouldStay)
 	local intro = frame:CreateAnimationGroup()
 	local introFade = intro:CreateAnimation("Alpha")
@@ -10647,666 +10960,12 @@ function LockRemindersAttachPop(frame, shouldStay)
 	frame.fade = fade
 end
 
-function LockRemindersSyncVital(healthLow, manaLow, soundId, replay)
-	local frame = LockRemindersMisc.vital
-	if not frame or LockRemindersMisc.vitalMoving then
-		return
-	end
-	if not healthLow and not manaLow then
-		if not frame:IsShown() then
-			return
-		end
-		if frame.fade and frame.fade:IsPlaying() then
-			return
-		end
-		if frame.intro and frame.intro:IsPlaying() then
-			frame.intro:Stop()
-			frame:SetScale(1)
-		end
-		frame:SetAlpha(1)
-		if frame.fade then
-			frame.fade:Play()
-		else
-			frame:Hide()
-		end
-		return
-	end
-	local healthShown = frame.health:IsShown()
-	local manaShown = frame.mana:IsShown()
-	if not frame:IsShown() or replay or healthShown ~= healthLow or manaShown ~= manaLow then
-		LockRemindersApplyVitalLook()
-		LockRemindersPlaceVitalText(healthLow, manaLow)
-	end
-	local fading = frame.fade and frame.fade:IsPlaying()
-	if not frame:IsShown() or fading or replay then
-		if fading then
-			frame.fade:Stop()
-		end
-		if frame.intro and frame.intro:IsPlaying() then
-			frame.intro:Stop()
-		end
-		frame:SetScale(1)
-		frame:SetAlpha(1)
-		frame:Show()
-		if frame.intro then
-			frame.intro:Play()
-		end
-	end
-	if soundId and soundId ~= "none" then
-		LockRemindersPlaySoundId(soundId, replay)
-	end
-end
-
-function LockRemindersSetVitalMove(on)
-	LockRemindersMisc.vitalMoving = on and true or false
-	local frame = LockRemindersMisc.vital
-	if not frame then
-		return
-	end
-	if frame.intro and frame.intro:IsPlaying() then
-		frame.intro:Stop()
-	end
-	if frame.fade and frame.fade:IsPlaying() then
-		frame.fade:Stop()
-	end
-	frame:SetScale(1)
-	frame:SetAlpha(1)
-	if LockRemindersMisc.vitalMoving then
-		LockRemindersApplyVitalLook()
-		LockRemindersPlaceVitalText(true, true)
-		frame:Show()
-		frame:EnableMouse(true)
-		frame.hint:Show()
-		frame:SetBackdropColor(0.08, 0.05, 0.12, 0.72)
-		frame:SetBackdropBorderColor(0.7, 0.5, 0.9, 0.9)
-	else
-		frame:EnableMouse(false)
-		frame.hint:Hide()
-		frame:SetBackdropColor(0, 0, 0, 0)
-		frame:SetBackdropBorderColor(0, 0, 0, 0)
-		LockRemindersMisc.previewUntil = nil
-		LockRemindersMiscTick()
-	end
-	LockRemindersRefreshMisc()
-end
-
-function LockRemindersPreviewVital(kind)
-	if not LockRemindersMisc.vital then
-		return
-	end
-	if LockRemindersMisc.vitalMoving then
-		LockRemindersSetVitalMove(false)
-	end
-	local sound = kind == "mana" and (db and db.manaSound or "chiji") or (db and db.healthSound or "zaps")
-	LockRemindersMisc.previewUntil = GetTime() + LockRemindersVitalHold()
-	LockRemindersSyncVital(kind ~= "mana", kind ~= "health", sound, true)
-end
-
-function LockRemindersVitalCurve(percent)
-	LockRemindersMisc.curves = LockRemindersMisc.curves or {}
-	percent = tonumber(percent) or 35
-	local curve = LockRemindersMisc.curves[percent]
-	if curve then
-		return curve
-	end
-	if not C_CurveUtil or not C_CurveUtil.CreateCurve or not Enum or not Enum.LuaCurveType then
-		return nil
-	end
-	local ok, created = pcall(C_CurveUtil.CreateCurve)
-	if not ok or not created or not created.AddPoint then
-		return nil
-	end
-	local edge = percent / 100
-	if edge < 0.01 then
-		edge = 0.01
-	elseif edge > 0.99 then
-		edge = 0.99
-	end
-	pcall(created.SetType, created, Enum.LuaCurveType.Step)
-	created:AddPoint(0, 2)
-	created:AddPoint(edge, 2)
-	created:AddPoint(math.min(edge + 0.001, 1), 0)
-	created:AddPoint(1, 0)
-	LockRemindersMisc.curves[percent] = created
-	return created
-end
-
-function LockRemindersCurveAlpha(kind, percent)
-	local curve = LockRemindersVitalCurve(percent)
-	if not curve then
-		return nil
-	end
-	local function take(ok, alpha)
-		if ok and alpha ~= nil then
-			return alpha
-		end
-	end
-	if kind == "health" and UnitHealthPercent then
-		local alpha = take(pcall(UnitHealthPercent, "player", true, curve))
-		if alpha ~= nil then
-			return alpha
-		end
-		return take(pcall(UnitHealthPercent, "player", false, curve))
-	end
-	if kind == "mana" and UnitPowerPercent then
-		local power = LockRemindersPlayerPower()
-		local alpha = take(pcall(UnitPowerPercent, "player", power, true, curve))
-		if alpha ~= nil then
-			return alpha
-		end
-		return take(pcall(UnitPowerPercent, "player", power, false, curve))
-	end
-end
-
-function LockRemindersSecretLow(kind, percent)
-	percent = tonumber(percent) or 0
-	local function below(value)
-		if value == nil then
-			return nil
-		end
-		if type(value) == "boolean" then
-			return value
-		end
-		if not LockRemindersSecret(value) then
-			value = tonumber(value)
-			if not value then
-				return nil
-			end
-			if value <= 1 and percent > 1 then
-				return value <= percent / 100
-			end
-			return value <= percent
-		end
-		if not C_CurveUtil or not C_CurveUtil.EvaluateColorValueFromBoolean then
-			return nil
-		end
-		local line = percent / 100
-		local ok, bit = pcall(function()
-			return C_CurveUtil.EvaluateColorValueFromBoolean((value > 1 and value <= percent) or (value >= 0 and value <= 1 and value <= line), 1, 0)
-		end)
-		if not ok or bit == nil or LockRemindersSecret(bit) then
-			return nil
-		end
-		if type(bit) == "table" then
-			bit = bit.r or bit[1]
-		end
-		if bit == nil or LockRemindersSecret(bit) then
-			return nil
-		end
-		bit = tonumber(bit)
-		if bit == 1 then
-			return true
-		end
-		if bit == 0 then
-			return false
-		end
-		return nil
-	end
-	if kind == "health" then
-		if UnitHealthPercent and CurveConstants and CurveConstants.ScaleTo100 then
-			local tries = { true, false }
-			for index = 1, #tries do
-				local ok, value = pcall(UnitHealthPercent, "player", tries[index], CurveConstants.ScaleTo100)
-				if ok then
-					local low = below(value)
-					if low ~= nil then
-						return low
-					end
-				end
-			end
-		end
-		if UnitHealth and UnitHealthMax then
-			local okCurrent, current = pcall(UnitHealth, "player")
-			local okMax, max = pcall(UnitHealthMax, "player")
-			if okCurrent and okMax then
-				local okRatio, ratio = pcall(function()
-					return current / max * 100
-				end)
-				if okRatio then
-					return below(ratio)
-				end
-				local okCompare, compared = pcall(function()
-					return current * 100 <= max * percent
-				end)
-				if okCompare then
-					return below(compared)
-				end
-			end
-		end
-		return nil
-	end
-	local power = LockRemindersPlayerPower()
-	if UnitPowerPercent and CurveConstants and CurveConstants.ScaleTo100 then
-		local tries = { true, false }
-		for index = 1, #tries do
-			local ok, value = pcall(UnitPowerPercent, "player", power, tries[index], CurveConstants.ScaleTo100)
-			if ok then
-				local low = below(value)
-				if low ~= nil then
-					return low
-				end
-			end
-		end
-	end
-	if UnitPower and UnitPowerMax then
-		local okCurrent, current = pcall(UnitPower, "player", power)
-		local okMax, max = pcall(UnitPowerMax, "player", power)
-		if okCurrent and okMax then
-			local okRatio, ratio = pcall(function()
-				return current / max * 100
-			end)
-			if okRatio then
-				return below(ratio)
-			end
-			local okCompare, compared = pcall(function()
-				return current * 100 <= max * percent
-			end)
-			if okCompare then
-				return below(compared)
-			end
-		end
-	end
-	return nil
-end
-
-function LockRemindersCurveBit(value)
-	if value == nil or not C_CurveUtil or not C_CurveUtil.EvaluateColorValueFromBoolean then
-		return nil
-	end
-	local ok, bit = pcall(function()
-		return C_CurveUtil.EvaluateColorValueFromBoolean(value, 1, 0)
-	end)
-	if not ok or bit == nil or LockRemindersSecret(bit) then
-		return nil
-	end
-	if type(bit) == "table" then
-		bit = bit.r or bit[1]
-	end
-	bit = tonumber(bit)
-	if bit == 1 then
-		return true
-	end
-	if bit == 0 then
-		return false
-	end
-	return nil
-end
-
-function LockRemindersCurveFlag(kind, percent)
-	local alpha = LockRemindersCurveAlpha(kind, percent)
-	if alpha == nil then
-		return nil
-	end
-	percent = tonumber(percent) or 35
-	local line = percent / 100
-	if not LockRemindersSecret(alpha) then
-		alpha = tonumber(alpha)
-		if not alpha then
-			return nil
-		end
-		if alpha >= 1.5 and alpha <= 2.5 then
-			return true
-		end
-		if alpha > 2.5 then
-			return alpha <= percent
-		end
-		if alpha <= 0.001 then
-			return false
-		end
-		return alpha <= line
-	end
-	local function ask(pred)
-		if not C_CurveUtil or not C_CurveUtil.EvaluateColorValueFromBoolean then
-			return nil
-		end
-		local ok, bit = pcall(function()
-			return C_CurveUtil.EvaluateColorValueFromBoolean(pred(), 1, 0)
-		end)
-		if not ok or bit == nil or LockRemindersSecret(bit) then
-			return nil
-		end
-		if type(bit) == "table" then
-			bit = bit.r or bit[1]
-		end
-		bit = tonumber(bit)
-		if bit == 1 then
-			return true
-		end
-		if bit == 0 then
-			return false
-		end
-		return nil
-	end
-	local above = ask(function()
-		return alpha > 2.5
-	end)
-	if above == true then
-		local under = ask(function()
-			return alpha <= percent
-		end)
-		if under ~= nil then
-			return under
-		end
-		return false
-	end
-	local sentinel = ask(function()
-		return alpha >= 1.5 and alpha <= 2.5
-	end)
-	if sentinel == true then
-		return true
-	end
-	local fraction = ask(function()
-		return alpha > 0 and alpha <= line
-	end)
-	if fraction ~= nil then
-		return fraction
-	end
-	if sentinel == false or above == false then
-		return false
-	end
-	return nil
-end
-
-function LockRemindersShowCurveVitals(healthOn, manaOn, healthPct, manaPct)
-	local frame = LockRemindersMisc.vital
-	if not frame then
-		return false
-	end
-	local function liveAlpha(alpha)
-		if alpha == nil then
-			return nil
-		end
-		-- Readable zero means "not low". Secret alphas are only used inside an
-		-- already-open one-shot window (caller gates that), never to discover a dip.
-		if LockRemindersSecret(alpha) then
-			return alpha
-		end
-		alpha = tonumber(alpha)
-		if not alpha or alpha <= 0.001 then
-			return nil
-		end
-		return alpha
-	end
-	local healthAlpha = healthOn and liveAlpha(LockRemindersCurveAlpha("health", healthPct)) or nil
-	local manaAlpha = manaOn and liveAlpha(LockRemindersCurveAlpha("mana", manaPct)) or nil
-	if healthAlpha == nil and manaAlpha == nil then
-		return false
-	end
-	LockRemindersMisc.curveShown = true
-	LockRemindersApplyVitalLook()
-	LockRemindersPlaceVitalText(healthAlpha ~= nil, manaAlpha ~= nil)
-	if healthAlpha ~= nil then
-		frame.health:SetAlpha(healthAlpha)
-	end
-	if manaAlpha ~= nil then
-		frame.mana:SetAlpha(manaAlpha)
-	end
-	if frame.fade and frame.fade:IsPlaying() then
-		frame.fade:Stop()
-	end
-	if frame.intro and frame.intro:IsPlaying() then
-		frame.intro:Stop()
-	end
-	frame:SetScale(1)
-	frame:SetAlpha(1)
-	frame:Show()
-	return true
-end
-
-function LockRemindersClearVitalGate()
-	LockRemindersMisc.healthReady = false
-	LockRemindersMisc.manaReady = false
-	LockRemindersMisc.healthDown = false
-	LockRemindersMisc.manaDown = false
-	LockRemindersMisc.healthHold = nil
-	LockRemindersMisc.manaHold = nil
-	LockRemindersMisc.vitalUntil = nil
-	LockRemindersMisc.healthLived = nil
-	LockRemindersMisc.manaLived = nil
-	local frame = LockRemindersMisc.vital
-	if not frame or LockRemindersMisc.vitalMoving then
-		return
-	end
-	if frame.intro and frame.intro:IsPlaying() then
-		frame.intro:Stop()
-	end
-	if frame.fade and frame.fade:IsPlaying() then
-		frame.fade:Stop()
-	end
-	frame:Hide()
-	frame:SetAlpha(1)
-	frame:SetScale(1)
-	if frame.health then
-		frame.health:Hide()
-	end
-	if frame.mana then
-		frame.mana:Hide()
-	end
-end
-
+-- WoW combat-text style: flash in, drift down, fade out.
 function LockRemindersMiscTick()
 	if not db then
 		return
 	end
 	LockRemindersUpdateSpeed()
-	if not LockRemindersMisc.vital or LockRemindersMisc.vitalMoving then
-		return
-	end
-	if LockRemindersMisc.previewUntil and GetTime() < LockRemindersMisc.previewUntil then
-		return
-	end
-	local quiet = LockRemindersZoneQuiet()
-	local healthOn = db.healthAlert ~= false
-	local manaOn = db.manaAlert ~= false
-	local healthPct = tonumber(db.healthPct) or 35
-	local manaPct = tonumber(db.manaPct) or 25
-	local hp, mp
-	local okHealth, healthValue = pcall(LockRemindersHealthPercent)
-	if okHealth and type(healthValue) == "number" then
-		hp = healthValue
-	end
-	local okMana, manaValue = pcall(LockRemindersManaPercent)
-	if okMana and type(manaValue) == "number" then
-		mp = manaValue
-	end
-	if hp and hp >= math.max(healthPct + 5, 40) then
-		LockRemindersMisc.healthLived = true
-	elseif hp == 0 or (hp and hp < 1) then
-		if not LockRemindersMisc.healthLived then
-			hp = nil
-		end
-	elseif hp and hp > 1 then
-		LockRemindersMisc.healthLived = true
-	end
-	if mp and mp >= math.max(manaPct + 5, 40) then
-		LockRemindersMisc.manaLived = true
-	elseif mp == 0 or (mp and mp < 1) then
-		if not LockRemindersMisc.manaLived then
-			mp = nil
-		end
-	elseif mp and mp > 1 then
-		LockRemindersMisc.manaLived = true
-	end
-	-- healthDown / manaDown = already warned for this dip (cleared only on recovery).
-	local healthSpent = LockRemindersMisc.healthDown and true or false
-	local manaSpent = LockRemindersMisc.manaDown and true or false
-	local healthFlag, manaFlag
-	if healthOn and hp == nil then
-		local line = healthSpent and (healthPct + 3) or healthPct
-		local okFlag, flag = pcall(LockRemindersCurveFlag, "health", line)
-		if okFlag then
-			healthFlag = flag
-		end
-		if healthFlag == nil then
-			local okLow, low = pcall(LockRemindersSecretLow, "health", line)
-			if okLow then
-				healthFlag = low
-			end
-		end
-		if healthFlag == false then
-			LockRemindersMisc.healthLived = true
-		end
-	end
-	if manaOn and mp == nil then
-		local line = manaSpent and (manaPct + 3) or manaPct
-		local okFlag, flag = pcall(LockRemindersCurveFlag, "mana", line)
-		if okFlag then
-			manaFlag = flag
-		end
-		if manaFlag == nil then
-			local okLow, low = pcall(LockRemindersSecretLow, "mana", line)
-			if okLow then
-				manaFlag = low
-			end
-		end
-		if manaFlag == false then
-			LockRemindersMisc.manaLived = true
-		end
-	end
-	if not quiet then
-		if healthOn and not LockRemindersMisc.healthReady and (hp ~= nil or healthFlag ~= nil) then
-			LockRemindersMisc.healthReady = true
-			local safe = (hp ~= nil and hp > healthPct + 3) or healthFlag == false
-			if safe then
-				hp = nil
-				healthFlag = nil
-			elseif healthFlag ~= true and LockRemindersMisc.healthLived ~= true then
-				hp = nil
-				healthFlag = nil
-			end
-		end
-		if manaOn and not LockRemindersMisc.manaReady and (mp ~= nil or manaFlag ~= nil) then
-			LockRemindersMisc.manaReady = true
-			local safe = (mp ~= nil and mp > manaPct + 3) or manaFlag == false
-			if safe then
-				mp = nil
-				manaFlag = nil
-			elseif manaFlag ~= true and LockRemindersMisc.manaLived ~= true then
-				mp = nil
-				manaFlag = nil
-			end
-		end
-	end
-	if quiet then
-		return
-	end
-	LockRemindersMisc.curveShown = false
-	local healthLow = false
-	local manaLow = false
-	local healthKnown = false
-	local manaKnown = false
-	local function curveSaysLow(kind, percent)
-		local ok, alpha = pcall(LockRemindersCurveAlpha, kind, percent)
-		if not ok or alpha == nil or LockRemindersSecret(alpha) then
-			return nil
-		end
-		alpha = tonumber(alpha)
-		if not alpha then
-			return nil
-		end
-		if alpha <= 0.001 then
-			return false
-		end
-		return true
-	end
-	if healthOn then
-		if hp ~= nil then
-			healthKnown = true
-			healthLow = hp <= (healthSpent and (healthPct + 3) or healthPct)
-		elseif healthFlag ~= nil then
-			healthKnown = true
-			healthLow = healthFlag and true or false
-		else
-			local curveLow = curveSaysLow("health", healthPct)
-			if curveLow ~= nil then
-				healthKnown = true
-				healthLow = curveLow
-			end
-		end
-	end
-	if manaOn then
-		if mp ~= nil then
-			manaKnown = true
-			manaLow = mp <= (manaSpent and (manaPct + 3) or manaPct)
-		elseif manaFlag ~= nil then
-			manaKnown = true
-			manaLow = manaFlag and true or false
-		else
-			local curveLow = curveSaysLow("mana", manaPct)
-			if curveLow ~= nil then
-				manaKnown = true
-				manaLow = curveLow
-			end
-		end
-	end
-	-- Recovery clears the spent latch so the next dip can alert once.
-	if healthOn and healthSpent and healthKnown and not healthLow then
-		healthSpent = false
-	end
-	if manaOn and manaSpent and manaKnown and not manaLow then
-		manaSpent = false
-	end
-	local now = GetTime()
-	local untilAt = LockRemindersMisc.vitalUntil
-	local inWindow = untilAt and now < untilAt
-	local sound
-	local healthEdge = healthOn and healthLow and not healthSpent
-	local manaEdge = manaOn and manaLow and not manaSpent
-	if healthEdge then
-		healthSpent = true
-		sound = db.healthSound or "zaps"
-	end
-	if manaEdge then
-		manaSpent = true
-		if not sound then
-			sound = db.manaSound or "chiji"
-		end
-	end
-	if healthEdge or manaEdge then
-		LockRemindersMisc.vitalUntil = now + LockRemindersVitalHold()
-		untilAt = LockRemindersMisc.vitalUntil
-		inWindow = true
-	end
-	LockRemindersMisc.healthDown = healthSpent
-	LockRemindersMisc.manaDown = manaSpent
-	-- Nothing to show: recovered / idle.
-	if not inWindow then
-		LockRemindersMisc.vitalUntil = nil
-		LockRemindersSyncVital(false, false, nil, false)
-		return
-	end
-	-- Inside the one-shot window: prefer readable flags; curve only paints when still unknown.
-	local showHealth = healthOn and (healthLow or (not healthKnown and healthSpent))
-	local showMana = manaOn and (manaLow or (not manaKnown and manaSpent))
-	if not showHealth and not showMana then
-		LockRemindersSyncVital(false, false, nil, false)
-		return
-	end
-	local wantCurveHealth = showHealth and not healthKnown
-	local wantCurveMana = showMana and not manaKnown
-	if wantCurveHealth or wantCurveMana then
-		if LockRemindersShowCurveVitals(wantCurveHealth, wantCurveMana, healthPct, manaPct) then
-			if sound and sound ~= "none" then
-				LockRemindersPlaySoundId(sound, false)
-				sound = nil
-			end
-			if (showHealth and not wantCurveHealth) or (showMana and not wantCurveMana) then
-				LockRemindersSyncVital(showHealth, showMana, sound, false)
-			end
-			return
-		end
-	end
-	LockRemindersSyncVital(showHealth, showMana, sound, false)
-end
-
-function LockRemindersVitalHold()
-	local hold = tonumber(db and db.vitalHold) or 3
-	if hold < 1 then
-		hold = 1
-	elseif hold > 8 then
-		hold = 8
-	end
-	return hold
 end
 
 function LockRemindersStartMisc()
@@ -11367,47 +11026,14 @@ function LockRemindersRefreshMisc()
 	if bar.speedSize then
 		bar.speedSize:SetText(tostring(tonumber(db.speedSize) or 18))
 	end
-	if bar.vitalSize then
-		bar.vitalSize:SetText(tostring(tonumber(db.vitalSize) or 32))
-	end
-	if bar.holdText then
-		bar.holdText:SetText(string.format("%.1f", LockRemindersVitalHold()))
-	end
-	if bar.healthText then
-		bar.healthText:SetText(tostring(tonumber(db.healthPct) or 35) .. "%")
-	end
-	if bar.manaText then
-		bar.manaText:SetText(tostring(tonumber(db.manaPct) or 25) .. "%")
-	end
 	if bar.speedMove then
 		bar.speedMove.label:SetText(LockRemindersMisc.speedMoving and "Done" or "Move")
 	end
-	if bar.vitalMove then
-		bar.vitalMove.label:SetText(LockRemindersMisc.vitalMoving and "Done" or "Move")
-	end
-	if bar.healthLabelBox and not bar.healthLabelBox:HasFocus() then
-		bar.healthLabelBox.quiet = true
-		bar.healthLabelBox:SetText(LockRemindersVitalLabel("health"))
-		bar.healthLabelBox.quiet = nil
-	end
-	if bar.manaLabelBox and not bar.manaLabelBox:HasFocus() then
-		bar.manaLabelBox.quiet = true
-		bar.manaLabelBox:SetText(LockRemindersVitalLabel("mana"))
-		bar.manaLabelBox.quiet = nil
+	if bar.speedColor then
+		LockRemindersPaintGlowButton(bar.speedColor, "speedColor", 1, 0.96, 0.9)
 	end
 	LockRemindersPaintChoiceRow(bar.speedLayout, db.speedSplit and "split" or "together")
-	if bar.refreshEffect then
-		bar.refreshEffect()
-	end
 	LockRemindersPaintToggle(bar.speedToggle, db.speedShow ~= false)
-	LockRemindersPaintToggle(bar.healthToggle, db.healthAlert ~= false)
-	LockRemindersPaintToggle(bar.manaToggle, db.manaAlert ~= false)
-	if bar.refreshHealth then
-		bar.refreshHealth()
-	end
-	if bar.refreshMana then
-		bar.refreshMana()
-	end
 end
 
 function LockRemindersChoiceMenu(parent, anchor, gap, choices, read, write, preview, width)
@@ -12084,6 +11710,13 @@ function LockRemindersBuildMisc(owner)
 		LockRemindersSetSpeedMove(not LockRemindersMisc.speedMoving)
 		LockRemindersRefreshMisc()
 	end)
+	bar.speedColor = LockRemindersGlowSwatch(speed, bar.speedMove, 12, "speedColor", 1, 0.96, 0.9, function()
+		LockRemindersApplySpeedLook()
+		LockRemindersRefreshMisc()
+	end)
+	if bar.speedColor.caption then
+		bar.speedColor.caption:SetText("Text")
+	end
 	local together = CreateFrame("Button", nil, speed, "BackdropTemplate")
 	together:SetSize(84, 22)
 	together:SetPoint("TOPLEFT", 176, -50)
@@ -12107,103 +11740,6 @@ function LockRemindersBuildMisc(owner)
 	split:SetScript("OnClick", pickLayout)
 	bar.speedLayout = { together, split }
 
-	LockRemindersSettingsHead(bar, "Alerts")
-	local health = LockRemindersSettingsCard(bar, 82, "Interface\\Icons\\INV_Potion_54", "Low health", "You")
-	bar.healthToggle = toggle(health, "healthAlert", 176, -14)
-	local healthBelow = LockRemindersSettingsCaption(health, bar.healthToggle, "Below", 12)
-	local healthPlus
-	healthPlus, bar.healthText = LockRemindersSettingsStepper(health, healthBelow, 8, function()
-		return db.healthPct or 35
-	end, function(value)
-		db.healthPct = value
-		LockRemindersRefreshMisc()
-	end, 5, 90, 5)
-	local healthTest = LockRemindersSettingsButton(health, healthPlus, "Test", 12, function()
-		LockRemindersPreviewVital("health")
-	end)
-	local healthTextLabel = LockRemindersSettingsCaption(health, health, "Text", 0)
-	healthTextLabel:ClearAllPoints()
-	healthTextLabel:SetPoint("TOPLEFT", 176, -50)
-	bar.healthLabelBox = LockRemindersSettingsEdit(health, healthTextLabel, "healthLabel", "LOW HEALTH", 160, LockRemindersApplyVitalLook)
-	local healthSoundLabel = LockRemindersSettingsCaption(health, bar.healthLabelBox, "Sound", 12)
-	bar.refreshHealth = LockRemindersMakeSoundRow(health, healthSoundLabel, function()
-		return db and db.healthSound or "zaps"
-	end, function(id)
-		db.healthSound = id
-	end)
-
-	local mana = LockRemindersSettingsCard(bar, 82, "Interface\\Icons\\INV_Potion_76", "Low mana", "You")
-	bar.manaToggle = toggle(mana, "manaAlert", 176, -14)
-	local manaBelow = LockRemindersSettingsCaption(mana, bar.manaToggle, "Below", 12)
-	local manaPlus
-	manaPlus, bar.manaText = LockRemindersSettingsStepper(mana, manaBelow, 8, function()
-		return db.manaPct or 25
-	end, function(value)
-		db.manaPct = value
-		LockRemindersRefreshMisc()
-	end, 5, 90, 5)
-	local manaTest = LockRemindersSettingsButton(mana, manaPlus, "Test", 12, function()
-		LockRemindersPreviewVital("mana")
-	end)
-	local manaTextLabel = LockRemindersSettingsCaption(mana, mana, "Text", 0)
-	manaTextLabel:ClearAllPoints()
-	manaTextLabel:SetPoint("TOPLEFT", 176, -50)
-	bar.manaLabelBox = LockRemindersSettingsEdit(mana, manaTextLabel, "manaLabel", "LOW MANA", 160, LockRemindersApplyVitalLook)
-	local manaSoundLabel = LockRemindersSettingsCaption(mana, bar.manaLabelBox, "Sound", 12)
-	bar.refreshMana = LockRemindersMakeSoundRow(mana, manaSoundLabel, function()
-		return db and db.manaSound or "chiji"
-	end, function(id)
-		db.manaSound = id
-	end)
-
-	LockRemindersSettingsHead(bar, "Look")
-	local vital = LockRemindersSettingsCard(bar, 84, "Interface\\Icons\\INV_Misc_Note_01", "Alert text", "Both lines")
-	local vitalSizeLabel = vital:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	vitalSizeLabel:SetPoint("TOPLEFT", 176, -14)
-	vitalSizeLabel:SetText("Size")
-	vitalSizeLabel:SetTextColor(0.9, 0.84, 1)
-	local vitalPlus
-	vitalPlus, bar.vitalSize = LockRemindersSettingsStepper(vital, vitalSizeLabel, 8, function()
-		return db.vitalSize or 32
-	end, function(value)
-		db.vitalSize = value
-		LockRemindersApplyVitalLook()
-		LockRemindersRefreshMisc()
-	end, 16, 64, 2)
-	local holdLabel = LockRemindersSettingsCaption(vital, vitalPlus, "Seconds", 12)
-	local holdPlus
-	holdPlus, bar.holdText = LockRemindersSettingsStepper(vital, holdLabel, 8, function()
-		return LockRemindersVitalHold()
-	end, function(value)
-		db.vitalHold = value
-		LockRemindersRefreshMisc()
-	end, 1, 8, 0.5)
-	bar.vitalMove = LockRemindersSettingsButton(vital, holdPlus, "Move", 12, function()
-		LockRemindersSetVitalMove(not LockRemindersMisc.vitalMoving)
-		LockRemindersRefreshMisc()
-	end)
-	local effectLabel = vital:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	effectLabel:SetPoint("TOPLEFT", 176, -50)
-	effectLabel:SetText("Effect")
-	effectLabel:SetTextColor(0.9, 0.84, 1)
-	bar.refreshEffect = LockRemindersChoiceMenu(vital, effectLabel, 8, {
-		{ "None", "none" },
-		{ "Pulse", "pulse" },
-		{ "Shake", "shake" },
-		{ "Bounce", "bounce" },
-		{ "Flash", "flash" },
-		{ "Pop", "pop" },
-	}, function()
-		return db.vitalStyle or "none"
-	end, function(id)
-		db.vitalStyle = id
-		LockRemindersApplyVitalFace()
-		if not LockRemindersMisc.vitalMoving then
-			LockRemindersMisc.previewUntil = GetTime() + math.max(LockRemindersVitalHold(), 2)
-			LockRemindersSyncVital(true, true, nil, true)
-		end
-		LockRemindersRefreshMisc()
-	end)
 	LockRemindersSettingsFinish(bar)
 end
 
@@ -12280,71 +11816,35 @@ function CreateMiscAlerts()
 	LockRemindersApplySpeedLook()
 	LockRemindersApplyNamedPoint(speed, "speedPoint", { "CENTER", "CENTER", 0, -160 })
 	LockRemindersApplyNamedPoint(target, "speedTargetPoint", { "CENTER", "CENTER", 90, -160 })
-
-	local vital = CreateFrame("Frame", "LockRemindersVital", UIParent, "BackdropTemplate")
-	vital:SetFrameStrata("HIGH")
-	vital:SetClampedToScreen(true)
-	vital:SetMovable(true)
-	vital:EnableMouse(true)
-	vital:RegisterForDrag("LeftButton")
-	vital:SetScript("OnDragStart", function(self)
-		if LockRemindersMisc.vitalMoving then
-			self:StartMoving()
-		end
-	end)
-	vital:SetScript("OnDragStop", function(self)
-		self:StopMovingOrSizing()
-		LockRemindersSaveNamedPoint(self, "vitalPoint")
-	end)
-	vital:SetBackdrop(BACKDROP)
-	vital:SetBackdropColor(0, 0, 0, 0)
-	vital:SetBackdropBorderColor(0, 0, 0, 0)
-	vital.ornament = vital:CreateTexture(nil, "ARTWORK")
-	vital.ornament:SetPoint("CENTER")
-	vital.ornament:Hide()
-	vital.health = vital:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-	vital.health:SetJustifyH("CENTER")
-	vital.health:SetText("LOW HEALTH")
-	vital.health:SetTextColor(1, 0.22, 0.18)
-	vital.health:SetShadowColor(0, 0, 0, 1)
-	vital.health:SetShadowOffset(2, -2)
-	vital.mana = vital:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-	vital.mana:SetJustifyH("CENTER")
-	vital.mana:SetText("LOW MANA")
-	vital.mana:SetTextColor(0.45, 0.72, 1)
-	vital.mana:SetShadowColor(0, 0, 0, 1)
-	vital.mana:SetShadowOffset(2, -2)
-	vital:SetScript("OnUpdate", LockRemindersStepVitalMotion)
-	vital.hint = vital:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	vital.hint:SetPoint("TOP", vital, "BOTTOM", 0, -2)
-	vital.hint:SetText("Drag")
-	vital.hint:SetTextColor(1, 0.7, 0.65)
-	vital.hint:Hide()
-	vital:EnableMouse(false)
-	LockRemindersMisc.vital = vital
-	LockRemindersAttachPop(vital, function()
-		if LockRemindersMisc.vitalMoving then
-			return true
-		end
-		if LockRemindersMisc.previewUntil and GetTime() < LockRemindersMisc.previewUntil then
-			return true
-		end
-		-- One-shot: only keep the frame while the vitalHold window is open.
-		local untilAt = LockRemindersMisc.vitalUntil
-		return untilAt ~= nil and GetTime() < untilAt
-	end)
-	LockRemindersApplyVitalLook()
-	LockRemindersApplyNamedPoint(vital, "vitalPoint", { "CENTER", "CENTER", 0, 60 })
-	vital:Hide()
+	-- Hide a leftover vital frame from older addon versions.
+	local oldVital = _G.LockRemindersVital
+	if oldVital then
+		oldVital:Hide()
+		oldVital:SetParent(nil)
+	end
 	LockRemindersUpdateSpeed()
 end
 
 function LockRemindersSecret(value)
-	if value == nil or not issecretvalue then
+	if value == nil then
+		return false
+	end
+	-- Prefer canaccessvalue when present (oUF/ElvUI Forever path).
+	if canaccessvalue then
+		local ok, access = pcall(canaccessvalue, value)
+		if ok then
+			return not access
+		end
+	end
+	if not issecretvalue then
 		return false
 	end
 	local ok, secret = pcall(issecretvalue, value)
-	return not ok or secret and true or false
+	-- If the checker errors, do not treat the value as secret.
+	if not ok then
+		return false
+	end
+	return secret and true or false
 end
 
 function LockRemindersSecretEquals(value, expected)
@@ -13120,17 +12620,111 @@ function LockRemindersRecordMagicDamage(unit, amount)
 end
 
 function LockRemindersMissDelay(cast, now)
-	local wait = 0.55
+	local wait = 0.35
+	if cast and cast.aura then
+		wait = 0.45
+	end
 	if cast and cast.travel then
-		local due = (cast.at or now) + 2.2 - now
+		local due = (cast.at or now) + 1.4 - now
 		if due > wait then
 			wait = due
 		end
-		if wait > 2.6 then
-			wait = 2.6
+		if wait > 2.2 then
+			wait = 2.2
 		end
 	end
 	return wait
+end
+
+function LockRemindersMissWatchUnit(unit)
+	if type(unit) ~= "string" or unit == "" then
+		return false
+	end
+	if unit == "target" or unit == "pettarget" or unit == "focus" then
+		return true
+	end
+	if unit:find("^nameplate%d") and UnitIsUnit then
+		local ok, same = pcall(UnitIsUnit, unit, "target")
+		if ok and same == true and not LockRemindersSecret(same) then
+			return true
+		end
+		ok, same = pcall(UnitIsUnit, unit, "pettarget")
+		if ok and same == true and not LockRemindersSecret(same) then
+			return true
+		end
+	end
+	return false
+end
+
+function LockRemindersQueueMissAlert(unit, cast, missType)
+	if not cast or not missType or not C_Timer or not C_Timer.After then
+		if cast then
+			LockRemindersShowMissCast(cast, unit, missType)
+		end
+		return
+	end
+	if cast.landed or cast.used then
+		return
+	end
+	-- Spell already on the target: this "miss" was something else.
+	if LockRemindersUnitHasSpell(unit, cast.spellID, cast.name, cast.at, true) then
+		cast.landed = true
+		return
+	end
+	cast.used = true
+	local now = GetTime()
+	local guid = LockRemindersMissGuid(unit)
+	local wait = LockRemindersMissDelay(cast, now)
+	local held = {
+		cast = cast,
+		unit = unit,
+		guid = guid,
+		missType = missType,
+		at = now,
+		cancel = false,
+	}
+	LockRemindersMiss.held = held
+	C_Timer.After(wait, function()
+		if LockRemindersMiss.held == held then
+			LockRemindersMiss.held = nil
+		end
+		if held.cancel or cast.landed then
+			cast.used = nil
+			return
+		end
+		if LockRemindersUnitHasSpell(unit, cast.spellID, cast.name, cast.at, true) then
+			cast.landed = true
+			cast.used = nil
+			return
+		end
+		local hitAt = LockRemindersMiss.hitAt
+		if hitAt and hitAt >= (held.at or 0) - 0.02 then
+			if LockRemindersMissSame(LockRemindersMiss.hitUnit, unit, LockRemindersMiss.hitGuid, guid) then
+				cast.landed = true
+				cast.used = nil
+				return
+			end
+		end
+		if missType == "IMMUNE" and cast.target then
+			if LockRemindersBanishMatch(cast.spellID, cast.name) then
+				if LockRemindersWarlock.ends then
+					LockRemindersWarlock.ends[cast.target] = nil
+				end
+				if LockRemindersWarlock.guess then
+					LockRemindersWarlock.guess[cast.target] = nil
+				end
+			end
+			if LockRemindersFearMatch(cast.spellID, cast.name) and LockRemindersWarlock.fearData then
+				if LockRemindersWarlock.fearData.ends then
+					LockRemindersWarlock.fearData.ends[cast.target] = nil
+				end
+				if LockRemindersWarlock.fearData.guess then
+					LockRemindersWarlock.fearData.guess[cast.target] = nil
+				end
+			end
+		end
+		LockRemindersShowMissCast(cast, unit, missType)
+	end)
 end
 
 function LockRemindersScheduleHitRetire(unit, cast)
@@ -13408,43 +13002,21 @@ function LockRemindersTakeMissCast(unit, eventSchool, woundMiss, schoolMagic)
 		if eventSchool and eventSchool ~= 1 then
 			schoolOk = not castSchool or LockRemindersSchoolOverlaps(eventSchool, castSchool)
 		elseif schoolMagic then
-			schoolOk = true
-		elseif not eventSchool and not cast.travel and age <= (LockRemindersCastIsDot(cast) and 1.2 or 0.6) then
-			schoolOk = true
+			-- Explicit RESIST/IMMUNE: still prefer overlapping schools when known.
+			schoolOk = not eventSchool or not castSchool or eventSchool ~= 1 or LockRemindersSchoolOverlaps(eventSchool, castSchool)
+			if eventSchool == 1 and castSchool and castSchool ~= 1 then
+				schoolOk = false
+			end
 		elseif not eventSchool and cast.travel and age >= 0.08 and age <= limit then
 			schoolOk = true
-		elseif not eventSchool and age <= limit then
+		elseif not eventSchool and not cast.travel and age <= (LockRemindersCastIsDot(cast) and 1.0 or 0.45) then
 			schoolOk = true
 		end
 		local saved = LockRemindersMissSpellSaved(cast.spellID or cast.secretID, cast.name)
 		if schoolOk and not cast.used and not cast.landed and aimed and age <= limit and saved and LockRemindersMissUnit(unit, cast.kind) then
-			if LockRemindersCastIsDot(cast) then
-				if LockRemindersUnitHasSpell(unit, cast.spellID, cast.name, cast.at, true) then
-					cast.landed = true
-				else
-					cast.used = true
-					return cast
-				end
-			elseif LockRemindersUnitHasSpell(unit, cast.spellID, cast.name, cast.at, true) then
+			if LockRemindersUnitHasSpell(unit, cast.spellID, cast.name, cast.at, true) then
 				cast.landed = true
 			else
-				cast.used = true
-				if cast.target and LockRemindersBanishMatch(cast.spellID, cast.name) then
-					if LockRemindersWarlock.ends then
-						LockRemindersWarlock.ends[cast.target] = nil
-					end
-					if LockRemindersWarlock.guess then
-						LockRemindersWarlock.guess[cast.target] = nil
-					end
-				end
-				if cast.target and LockRemindersFearMatch(cast.spellID, cast.name) and LockRemindersWarlock.fearData then
-					if LockRemindersWarlock.fearData.ends then
-						LockRemindersWarlock.fearData.ends[cast.target] = nil
-					end
-					if LockRemindersWarlock.fearData.guess then
-						LockRemindersWarlock.fearData.guess[cast.target] = nil
-					end
-				end
 				return cast
 			end
 		end
@@ -13508,10 +13080,13 @@ function LockRemindersNoteInterrupted(unit, first, second, third)
 end
 
 function LockRemindersShowRecentMiss(unit, missType)
+	if not LockRemindersMissWatchUnit(unit) then
+		return
+	end
 	local now = GetTime()
 	local guid = unit and LockRemindersMissGuid(unit) or nil
 	local casts = LockRemindersMiss.casts or {}
-	local function tryCast(cast, aimedOnly)
+	local function tryCast(cast)
 		if not cast or cast.used or cast.landed then
 			return false
 		end
@@ -13520,7 +13095,7 @@ function LockRemindersShowRecentMiss(unit, missType)
 			return false
 		end
 		local aimed = cast.aoe or not guid or not cast.target or cast.target == guid
-		if aimedOnly and not aimed then
+		if not aimed then
 			return false
 		end
 		local saved = missType == "IMMUNE" or LockRemindersMissSpellSaved(cast.spellID or cast.secretID, cast.name)
@@ -13530,58 +13105,52 @@ function LockRemindersShowRecentMiss(unit, missType)
 		if not saved then
 			return false
 		end
-		cast.used = true
-		local held = LockRemindersMiss.held
-		if held and held.cast == cast then
-			held.cancel = true
+		if LockRemindersUnitHasSpell(unit, cast.spellID, cast.name, cast.at, true) then
+			cast.landed = true
+			return false
 		end
-		LockRemindersShowMissCast(cast, unit, missType)
+		LockRemindersQueueMissAlert(unit, cast, missType)
 		return true
 	end
 	for index = #casts, 1, -1 do
-		if tryCast(casts[index], true) then
+		if tryCast(casts[index]) then
 			return
 		end
 	end
-	for index = #casts, 1, -1 do
-		if tryCast(casts[index], false) then
-			return
-		end
+end
+
+function LockRemindersResolveCombatToken(value)
+	if value == nil then
+		return nil
 	end
+	if LockRemindersSecret(value) then
+		local names = { "MISS", "MISSED", "RESIST", "RESISTED", "IMMUNE", "WOUND", "HEAL", "DODGE", "PARRY", "BLOCK", "ABSORB", "EVADE", "DEFLECT", "REFLECT" }
+		for index = 1, #names do
+			if LockRemindersSecretEquals(value, names[index]) then
+				return names[index]
+			end
+		end
+		return nil
+	end
+	if type(value) ~= "string" then
+		return nil
+	end
+	return value:upper()
 end
 
 function LockRemindersHandleUnitCombat(unit, action, flag, amount, school)
 	if not db then
 		return
 	end
-	if LockRemindersSecret(unit) then
-		unit = nil
+	if LockRemindersSecret(unit) or type(unit) ~= "string" or unit == "" then
+		return
 	end
-	if LockRemindersSecret(action) then
-		local names = { "MISS", "MISSED", "RESIST", "RESISTED", "IMMUNE", "WOUND" }
-		local resolved
-		for index = 1, #names do
-			if LockRemindersSecretEquals(action, names[index]) then
-				resolved = names[index]
-				break
-			end
-		end
-		action = resolved
-	end
+	-- Outgoing misses land on the enemy unit (CombatTextPlus). Ignore self.
 	if unit == "player" or unit == "pet" or unit == "vehicle" then
 		return
 	end
-	if LockRemindersSecret(flag) then
-		local names = { "MISS", "MISSED", "RESIST", "RESISTED", "IMMUNE", "WOUND" }
-		local resolved
-		for index = 1, #names do
-			if LockRemindersSecretEquals(flag, names[index]) then
-				resolved = names[index]
-				break
-			end
-		end
-		flag = resolved
-	end
+	action = LockRemindersResolveCombatToken(action)
+	flag = LockRemindersResolveCombatToken(flag)
 	local rawAmount = amount
 	local amountSecret = LockRemindersSecret(amount)
 	if amountSecret then
@@ -13592,6 +13161,8 @@ function LockRemindersHandleUnitCombat(unit, action, flag, amount, school)
 		elseif zero == false then
 			amount = 1
 		end
+	elseif amount ~= nil then
+		amount = tonumber(amount)
 	end
 	if LockRemindersSecret(school) then
 		school = nil
@@ -13601,50 +13172,47 @@ function LockRemindersHandleUnitCombat(unit, action, flag, amount, school)
 			school = nil
 		end
 	end
-	action = type(action) == "string" and action:upper() or nil
-	flag = type(flag) == "string" and flag:upper() or nil
-	if not action and (flag == "MISS" or flag == "MISSED" or flag == "RESIST" or flag == "RESISTED" or flag == "IMMUNE") then
-		action = flag
-	end
-	if not amountSecret then
-		amount = tonumber(amount)
-	end
-	if not action and amount == 0 and school ~= 1 then
-		action = flag == "RESIST" and "RESIST" or "MISS"
-	end
 	if not LockRemindersMissFlags then
 		LockRemindersMissFlags = {
 			ABSORB = true, BLOCK = true, IMMUNE = true, DODGE = true,
 			PARRY = true, DEFLECT = true, EVADE = true, REFLECT = true,
 		}
 	end
-	-- A partial resist still deals damage. Only a plain zero is a full miss.
-	-- Dodge, parry, absorb and block are not a failed spell. Immune is its
-	-- own alert. A DoT tick is not a Shadow Bolt hit: the hit is the damage
-	-- that does not continue a tick, and it closes the bolt before a miss
-	-- from a swing can be blamed on it.
-	local immuneEvent = action == "IMMUNE" or flag == "IMMUNE"
-	if immuneEvent and school ~= 1 and (action ~= "WOUND" or amount == 0 or amount == nil) then
-		if db.immuneAlert ~= false then
-			local cast = LockRemindersTakeMissCast(unit, school, false, school ~= 1)
-			if cast then
-				LockRemindersShowMissCast(cast, unit, "IMMUNE")
-			else
-				LockRemindersShowRecentMiss(unit, "IMMUNE")
-			end
-		end
-		return
-	end
+	-- CombatTextPlus: action itself is MISS/RESIST/IMMUNE (not WOUND). Trust that.
+	local missType
 	local woundMiss = false
-	if action == "WOUND" then
-		local ignored = flag and LockRemindersMissFlags[flag]
-		local fullMiss = amount == 0 and not ignored
-		if not fullMiss and (flag == "MISS" or flag == "MISSED" or flag == "RESIST") and amount == nil and not ignored then
-			fullMiss = true
+	local explicit = false
+	if action == "IMMUNE" or (action ~= "WOUND" and flag == "IMMUNE") then
+		missType = "IMMUNE"
+		explicit = true
+	elseif action == "RESIST" or action == "RESISTED" then
+		missType = "RESIST"
+		explicit = true
+	elseif action == "MISS" or action == "MISSED" then
+		missType = "MISS"
+		explicit = true
+	elseif action == "WOUND" then
+		local ignored = flag and LockRemindersMissFlags[flag] and flag ~= "IMMUNE"
+		if flag == "IMMUNE" and (amount == 0 or amount == nil) then
+			missType = "IMMUNE"
+			explicit = true
+		elseif flag == "RESIST" or flag == "RESISTED" then
+			local fullMiss = amount == 0 or amount == nil
+			if fullMiss and not ignored then
+				missType = "RESIST"
+				woundMiss = true
+			end
+		elseif flag == "MISS" or flag == "MISSED" then
+			local fullMiss = amount == 0 or amount == nil
+			if fullMiss and not ignored then
+				missType = "MISS"
+				woundMiss = true
+			end
+		elseif amount == 0 and not ignored then
+			missType = "MISS"
+			woundMiss = true
 		end
-		if not fullMiss then
-			-- Known damage only (no secret guesses). Grace after apply so DoT/swing spam
-			-- right as Fear lands does not wipe the timer before the alert can show.
+		if not missType then
 			if not ignored and type(amount) == "number" and amount > 0 then
 				pcall(LockRemindersNoteCcDamage, unit)
 			end
@@ -13654,30 +13222,52 @@ function LockRemindersHandleUnitCombat(unit, action, flag, amount, school)
 			end
 			return
 		end
-		action = flag == "RESIST" and "RESIST" or "MISS"
-		woundMiss = true
-	end
-	local missType
-	if action == "MISS" or action == "MISSED" then
-		missType = "MISS"
-	elseif action == "RESIST" or action == "RESISTED" then
-		missType = "RESIST"
+	elseif not action and (flag == "MISS" or flag == "MISSED" or flag == "RESIST" or flag == "RESISTED" or flag == "IMMUNE") then
+		if flag == "IMMUNE" then
+			missType = "IMMUNE"
+		elseif flag == "RESIST" or flag == "RESISTED" then
+			missType = "RESIST"
+		else
+			missType = "MISS"
+		end
+		explicit = true
+	elseif not action and amount == 0 and school ~= 1 then
+		missType = (flag == "RESIST" or flag == "RESISTED") and "RESIST" or "MISS"
 	end
 	if not missType then
 		return
 	end
-	-- Physical swing misses are not spell alerts. Resists are always magical.
+	if missType == "IMMUNE" and db.immuneAlert == false then
+		return
+	end
+	-- Only your current target (or its nameplate). Other plates' misses are not yours.
+	if not LockRemindersMissWatchUnit(unit) then
+		return
+	end
+	-- Partial resist that still deals damage is a hit, not a fail.
+	if missType == "RESIST" and type(amount) == "number" and amount > 0 then
+		return
+	end
+	-- Physical swing miss must not steal a pending Shadow Bolt / Fear cast.
 	if missType == "MISS" and school == 1 then
 		return
 	end
 	LockRemindersMiss.missAt = GetTime()
 	LockRemindersMiss.missGuid = LockRemindersMissGuid(unit)
-	local cast = LockRemindersTakeMissCast(unit, school, woundMiss, school ~= 1 and school ~= nil)
+	local schoolMagic = missType == "RESIST" or missType == "IMMUNE"
+	local cast = LockRemindersTakeMissCast(unit, school, woundMiss, schoolMagic)
 	if cast then
-		LockRemindersShowMissCast(cast, unit, missType)
+		LockRemindersQueueMissAlert(unit, cast, missType)
 		return
 	end
-	LockRemindersShowRecentMiss(unit, missType)
+	if missType == "IMMUNE" then
+		cast = LockRemindersTakeImmuneCast(unit)
+		if cast then
+			LockRemindersQueueMissAlert(unit, cast, "IMMUNE")
+			return
+		end
+	end
+	-- No recent tracked cast: do not guess from unrelated combat text.
 end
 
 function LockRemindersTakeImmuneCast(unit)
@@ -13706,24 +13296,11 @@ function LockRemindersTakeImmuneCast(unit)
 			limit = 1.2
 		end
 		if not cast.used and not cast.landed and aimed and age <= limit and LockRemindersMissUnit(unit, cast.kind) then
-			cast.used = true
-			if cast.target and LockRemindersBanishMatch(cast.spellID, cast.name) then
-				if LockRemindersWarlock.ends then
-					LockRemindersWarlock.ends[cast.target] = nil
-				end
-				if LockRemindersWarlock.guess then
-					LockRemindersWarlock.guess[cast.target] = nil
-				end
+			if LockRemindersUnitHasSpell(unit, cast.spellID, cast.name, cast.at, true) then
+				cast.landed = true
+			else
+				return cast
 			end
-			if cast.target and LockRemindersFearMatch(cast.spellID, cast.name) and LockRemindersWarlock.fearData then
-				if LockRemindersWarlock.fearData.ends then
-					LockRemindersWarlock.fearData.ends[cast.target] = nil
-				end
-				if LockRemindersWarlock.fearData.guess then
-					LockRemindersWarlock.fearData.guess[cast.target] = nil
-				end
-			end
-			return cast
 		end
 	end
 end
@@ -13928,6 +13505,7 @@ function LockRemindersReadMissLine(text)
 		return
 	end
 	local missType, spell, dest, kind = LockRemindersMissFromLine(text)
+	-- Ignore bare "Miss"/"Resist" combat-text words: they are not yours for sure.
 	if not missType or not spell then
 		return
 	end
@@ -14968,22 +14546,10 @@ function LockRemindersRegisterCombatUnits()
 	if not frame then
 		return
 	end
+	-- CombatTextPlus-style: plain UNIT_COMBAT (all units). RegisterUnitEvent
+	-- batches were dropping target/nameplate events on Forever.
+	pcall(frame.UnregisterEvent, frame, "UNIT_COMBAT")
 	pcall(frame.RegisterEvent, frame, "UNIT_COMBAT")
-	if not frame.RegisterUnitEvent then
-		return
-	end
-	local units = { "target", "focus", "mouseover", "pettarget", "player", "pet" }
-	for index = 1, 40 do
-		units[#units + 1] = "nameplate" .. index
-	end
-	local batch = {}
-	for index = 1, #units do
-		batch[#batch + 1] = units[index]
-		if #batch >= 8 or index == #units then
-			pcall(frame.RegisterUnitEvent, frame, "UNIT_COMBAT", unpack(batch))
-			wipe(batch)
-		end
-	end
 end
 
 function LockRemindersSoulSnapshot()
@@ -17941,7 +17507,7 @@ local function CreatePanel()
 	MakeTab("Procs", "talents", 302, 136)
 	MakeTab("Spell misses/resist", "spells", 446, 136)
 	MakeTab("CD Manager", "cds", 590, 136)
-	MakeTab("Status", "misc", 734, 136)
+	MakeTab("Miscellaneous", "misc", 734, 136)
 	if LockRemindersIsWarlock() then
 		MakeTab("Warlock", "soul", 14, 130)
 	end
@@ -18858,7 +18424,7 @@ local function Help()
 	Print("Procs lists the buff from the talent. Nightfall shows Shadow Trance.")
 	Print("Spell misses/resist: add a spell or a pet spell. Only those miss and resist.")
 	Print("CD Manager: track spell, racial, and trinket cooldowns. /lr cds")
-	Print("Status: speed, low health, and low mana. /lr misc")
+	Print("Miscellaneous: movement speed. /lr misc")
 	Print("Fun: emote a hostile player of a chosen race. /lr fun")
 	Print("Soulstone tracker is for warlocks. /lr soul")
 	Print("/lr arrange  —  arrange the icons inside the alert.")
@@ -19017,6 +18583,8 @@ local function Command(message)
 		db.immuneAlert = true
 		db.cdSpells = {}
 		db.cdItems = {}
+		db.cdOrder = {}
+		db.cdSortMode = "time"
 		db.cdPoint = { "CENTER", "CENTER", 0, -40 }
 		db.cdSize = 40
 		db.cdHold = 2.2
@@ -19044,26 +18612,10 @@ local function Command(message)
 		db.speedShow = true
 		db.speedSplit = false
 		db.speedSize = 18
+		db.speedColor = { r = 1, g = 0.96, b = 0.9 }
 		db.speedPoint = { "CENTER", "CENTER", 0, -160 }
 		db.speedTargetPoint = { "CENTER", "CENTER", 90, -160 }
-		db.healthAlert = true
-		db.healthPct = 35
-		db.healthSound = "zaps"
-		db.manaAlert = true
-		db.manaPct = 25
-		db.manaSound = "chiji"
-		db.vitalSize = 32
-		db.vitalHold = 3
-		db.healthLabel = "LOW HEALTH"
-		db.manaLabel = "LOW MANA"
-		db.vitalStyle = "none"
-		db.vitalPoint = { "CENTER", "CENTER", 0, 60 }
-		LockRemindersMisc.vitalUntil = nil
 		LockRemindersMisc.speedMoving = false
-		LockRemindersMisc.vitalMoving = false
-		LockRemindersMisc.healthDown = false
-		LockRemindersMisc.manaDown = false
-		LockRemindersMisc.previewUntil = nil
 		db.soulAlert = true
 		db.soulAnnounce = true
 		db.soulAnnounceParty = true
@@ -19153,11 +18705,6 @@ local function Command(message)
 				LockRemindersApplyNamedPoint(LockRemindersMisc.speed.target, "speedTargetPoint", db.speedTargetPoint)
 			end
 			LockRemindersSetSpeedMove(false)
-		end
-		if LockRemindersMisc.vital then
-			LockRemindersApplyVitalLook()
-			LockRemindersApplyNamedPoint(LockRemindersMisc.vital, "vitalPoint", db.vitalPoint)
-			LockRemindersMisc.vital:Hide()
 		end
 		if LockRemindersSoul.alert then
 			LockRemindersApplySoulLook()
@@ -19329,6 +18876,12 @@ local function InitDB()
 	if type(db.cdItems) ~= "table" then
 		db.cdItems = {}
 	end
+	if type(db.cdOrder) ~= "table" then
+		db.cdOrder = {}
+	end
+	if db.cdSortMode ~= "manual" and db.cdSortMode ~= "time" then
+		db.cdSortMode = "time"
+	end
 	if type(db.cdPoint) ~= "table" then
 		db.cdPoint = { "CENTER", "CENTER", 0, -40 }
 	end
@@ -19386,49 +18939,14 @@ local function InitDB()
 	if type(db.speedSize) ~= "number" then
 		db.speedSize = 18
 	end
+	if type(db.speedColor) ~= "table" then
+		db.speedColor = { r = 1, g = 0.96, b = 0.9 }
+	end
 	if type(db.speedPoint) ~= "table" then
 		db.speedPoint = { "CENTER", "CENTER", 0, -160 }
 	end
 	if type(db.speedTargetPoint) ~= "table" then
 		db.speedTargetPoint = { "CENTER", "CENTER", 90, -160 }
-	end
-	if type(db.healthAlert) ~= "boolean" then
-		db.healthAlert = true
-	end
-	if type(db.healthPct) ~= "number" then
-		db.healthPct = 35
-	end
-	if type(db.healthSound) ~= "string" or not LockRemindersKnownSound(db.healthSound) then
-		db.healthSound = "zaps"
-	end
-	if type(db.manaAlert) ~= "boolean" then
-		db.manaAlert = true
-	end
-	if type(db.manaPct) ~= "number" then
-		db.manaPct = 25
-	end
-	if type(db.manaSound) ~= "string" or not LockRemindersKnownSound(db.manaSound) then
-		db.manaSound = "chiji"
-	end
-	if type(db.vitalSize) ~= "number" then
-		db.vitalSize = 32
-	end
-	if type(db.vitalHold) ~= "number" then
-		db.vitalHold = 3
-	end
-	if type(db.vitalPoint) ~= "table" then
-		db.vitalPoint = { "CENTER", "CENTER", 0, 60 }
-	end
-	if type(db.healthLabel) ~= "string" then
-		db.healthLabel = "LOW HEALTH"
-	end
-	if type(db.manaLabel) ~= "string" then
-		db.manaLabel = "LOW MANA"
-	end
-	if type(db.vitalStyle) ~= "string" then
-		db.vitalStyle = "none"
-	elseif db.vitalStyle == "ring" or db.vitalStyle == "star" or db.vitalStyle == "lozenge" or db.vitalStyle == "glow" or db.vitalStyle == "icon" then
-		db.vitalStyle = "pulse"
 	end
 	if type(db.soulAlert) ~= "boolean" then
 		db.soulAlert = true
@@ -19878,7 +19396,6 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
 		CreateCDManagerAlert()
 		LockRemindersStartCDManager()
 		CreateMiscAlerts()
-		pcall(LockRemindersClearVitalGate)
 		LockRemindersStartMisc()
 		pcall(CreateSoulAlerts)
 		LockRemindersStartSoul()
@@ -19954,8 +19471,8 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
 		return
 	end
 	if event == "PLAYER_ENTERING_WORLD" then
+		-- Quiet sounds after zoning / loading screens.
 		LockRemindersEnteredAt = GetTime() + 8
-		pcall(LockRemindersClearVitalGate)
 		LockRemindersSoul.zoneMode = LockRemindersSoul.stable or LockRemindersSoul.mode or LockRemindersSoul.zoneMode
 		LockRemindersSoul.soundMode = LockRemindersSoul.zoneMode or LockRemindersSoul.soundMode
 		if LockRemindersBuffGone then
