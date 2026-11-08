@@ -112,6 +112,7 @@ local layoutEmpty
 local UpdateListNow
 local ShowLayout
 local HideLayout
+local SpellAliases
 
 local function Print(text)
 	DEFAULT_CHAT_FRAME:AddMessage("|cff9482c9LockReminders|r " .. text)
@@ -180,18 +181,19 @@ end
 local function HasAura(spellID)
 	spellID = tonumber(spellID)
 	if not spellID then
-			return nil
-		end
-	local absent = false
-	local function note(ok, aura)
-		if not ok or (issecretvalue and issecretvalue(aura)) then
 		return nil
 	end
-		if aura == nil or aura == false then
-			absent = true
+	local absent = false
+	local function note(ok, aura)
+		if not ok then
 			return nil
 		end
-		return true
+		-- Forever returns a sealed aura object while the buff is up.
+		if aura ~= nil and aura ~= false then
+			return true
+		end
+		absent = true
+		return nil
 	end
 	if C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID then
 		local ok, aura = pcall(C_UnitAuras.GetPlayerAuraBySpellID, spellID)
@@ -206,6 +208,7 @@ local function HasAura(spellID)
 		end
 	end
 	local wanted
+	local aliases = SpellAliases(spellID)
 	if C_Spell and C_Spell.GetSpellInfo then
 		local ok, info = pcall(C_Spell.GetSpellInfo, spellID)
 		if ok and info and type(info.name) == "string" and info.name ~= "" and not (issecretvalue and issecretvalue(info.name)) then
@@ -219,7 +222,17 @@ local function HasAura(spellID)
 		end
 	end
 	local function sameID(value)
-		if value == nil or (issecretvalue and issecretvalue(value)) then
+		if value == nil then
+			return false
+		end
+		if LockRemindersSameSpell then
+			for index = 1, #aliases do
+				if LockRemindersSameSpell(value, aliases[index]) then
+					return true
+				end
+			end
+		end
+		if issecretvalue and issecretvalue(value) then
 			return false
 		end
 		value = tonumber(value)
@@ -254,6 +267,8 @@ local function HasAura(spellID)
 				secret = true
 			elseif wanted and type(name) == "string" and name:lower() == wanted then
 				return true
+			elseif wanted and LockRemindersTalentNameMatch and LockRemindersTalentNameMatch(name, wanted) then
+				return true
 			end
 			for slot = 3, #packed do
 				if sameID(packed[slot]) then
@@ -273,22 +288,29 @@ local function HasAura(spellID)
 	if C_UnitAuras and C_UnitAuras.GetBuffDataByIndex then
 		for index = 1, 40 do
 			local ok, aura = pcall(C_UnitAuras.GetBuffDataByIndex, "player", index)
-			if not ok or (issecretvalue and issecretvalue(aura)) then
+			if not ok then
 				listHidden = true
 				break
 			end
 			if aura == nil or aura == false then
 				break
 			end
-			local id = aura.spellId or aura.spellID
-			local name = aura.name
+			local id, name
+			pcall(function()
+				id = aura.spellId or aura.spellID
+				name = aura.name
+			end)
 			if sameID(id) then
 				return true
 			end
-			if issecretvalue and (issecretvalue(id) or issecretvalue(name)) then
+			if issecretvalue and issecretvalue(aura) then
 				listHidden = true
-			elseif wanted and type(name) == "string" and name:lower() == wanted then
-				return true
+			elseif issecretvalue and (issecretvalue(id) or issecretvalue(name)) then
+				listHidden = true
+			elseif wanted and type(name) == "string" and not (issecretvalue and issecretvalue(name)) then
+				if name:lower() == wanted or (LockRemindersTalentNameMatch and LockRemindersTalentNameMatch(name, wanted)) then
+					return true
+				end
 			end
 		end
 	end
@@ -669,7 +691,7 @@ local function AuraScope(spellID)
 	return db.auras[spellID] or db.auras[tostring(spellID)]
 end
 
-local function SpellAliases(spellID)
+SpellAliases = function(spellID)
 	local list = {}
 	local seen = {}
 	local function add(id)
@@ -711,6 +733,14 @@ local function SpellAliases(spellID)
 	}
 	if skin[tonumber(spellID)] then
 		for id in pairs(skin) do
+			add(id)
+		end
+	end
+	local trance = {
+		[17941] = true, [18094] = true, [18095] = true,
+	}
+	if trance[tonumber(spellID)] then
+		for id in pairs(trance) do
 			add(id)
 		end
 	end
@@ -840,7 +870,7 @@ function LockRemindersSetSoonWatch(on)
 		if LockRemindersSoonTicker or not C_Timer or not C_Timer.NewTicker then
 			return
 		end
-		LockRemindersSoonTicker = C_Timer.NewTicker(0.2, function()
+		LockRemindersSoonTicker = C_Timer.NewTicker(0.4, function()
 			if LockRemindersRefresh then
 				pcall(LockRemindersRefresh)
 			end
@@ -2093,42 +2123,136 @@ local function SavedCount()
 end
 
 local function AuraAt(index)
-	local ok, aura = pcall(C_UnitAuras.GetBuffDataByIndex, "player", index)
-	if not ok or aura == nil then
+	local ok, aura
+	if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
+		ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, "player", index, "HELPFUL")
+	elseif C_UnitAuras and C_UnitAuras.GetBuffDataByIndex then
+		ok, aura = pcall(C_UnitAuras.GetBuffDataByIndex, "player", index)
+	else
+		return "end"
+	end
+	if not ok or aura == nil or aura == false then
 		return "end"
 	end
 	local readOk, spellID, name, icon = pcall(function()
-		if issecretvalue and issecretvalue(aura) then
-			return nil
+		local id, auraName, auraIcon
+		pcall(function()
+			id = aura.spellId or aura.spellID
+			auraName = aura.name
+			auraIcon = aura.icon
+		end)
+		-- Resolve sealed ids against configured talent procs.
+		if id ~= nil and db and type(db.talents) == "table" and LockRemindersSameSpell then
+			for saved in pairs(db.talents) do
+				local sid = tonumber(saved)
+				if sid then
+					local aliases = SpellAliases(sid)
+					for aliasIndex = 1, #aliases do
+						if LockRemindersSameSpell(id, aliases[aliasIndex]) then
+							return sid, (type(auraName) == "string" and auraName) or SpellName(sid), auraIcon
+						end
+					end
+				end
+			end
 		end
-		local id = aura.spellId or aura.spellID
-		local auraName = aura.name
-		local auraIcon = aura.icon
-		if not id or not auraName or auraName == "" then
-			return nil
+		if id ~= nil and issecretvalue and issecretvalue(id) then
+			id = nil
+		else
+			id = tonumber(id)
+			if id and id <= 0 then
+				id = nil
+			end
 		end
-		if issecretvalue and (issecretvalue(id) or issecretvalue(auraName)) then
-			return nil
+		if auraName ~= nil and issecretvalue and issecretvalue(auraName) then
+			auraName = nil
+		elseif type(auraName) == "string" and auraName == "" then
+			auraName = nil
 		end
-		if auraIcon and issecretvalue and issecretvalue(auraIcon) then
+		if auraIcon ~= nil and issecretvalue and issecretvalue(auraIcon) then
 			auraIcon = nil
+		end
+		if not id and not auraName then
+			return nil
 		end
 		return id, auraName, auraIcon
 	end)
-	if not readOk or not spellID or not name then
+	if not readOk then
+		return "skip"
+	end
+	if not spellID and (type(name) ~= "string" or name == "") then
 		return "skip"
 	end
 	return "ok", spellID, name, icon
 end
 
+local function UnitBuffAt(index)
+	if type(UnitBuff) ~= "function" then
+		return "end"
+	end
+	local packed = { pcall(UnitBuff, "player", index) }
+	if not packed[1] then
+		return "end"
+	end
+	local name = packed[2]
+	if name == nil or name == false then
+		if issecretvalue and issecretvalue(name) then
+			return "skip"
+		end
+		return "end"
+	end
+	if issecretvalue and issecretvalue(name) then
+		return "skip"
+	end
+	if type(name) ~= "string" or name == "" then
+		return "skip"
+	end
+	local spellID, icon
+	for slot = 3, #packed do
+		local value = packed[slot]
+		if value ~= nil and not (issecretvalue and issecretvalue(value)) then
+			if type(value) == "number" then
+				if value > 0 and value < 10000000 and not spellID then
+					spellID = value
+				elseif value > 10000000 and not icon then
+					icon = value
+				end
+			elseif type(value) == "string" and value ~= "" and not icon then
+				icon = value
+			end
+		end
+	end
+	return "ok", spellID, name, icon
+end
+
 local function EachAura(callback)
+	local seen = {}
+	local function emit(spellID, name, icon)
+		local key = Normalize(name or "")
+		if key == "" then
+			key = tostring(spellID or "")
+		end
+		if key == "" or seen[key] then
+			return
+		end
+		seen[key] = true
+		callback(spellID, name, icon)
+	end
 	for index = 1, 40 do
 		local status, spellID, name, icon = AuraAt(index)
+		if status == "end" then
+			break
+		end
+		if status == "ok" then
+			emit(spellID, name, icon)
+		end
+	end
+	for index = 1, 40 do
+		local status, spellID, name, icon = UnitBuffAt(index)
 		if status == "end" then
 			return
 		end
 		if status == "ok" then
-			callback(spellID, name, icon)
+			emit(spellID, name, icon)
 		end
 	end
 end
@@ -2151,10 +2275,19 @@ PlayerHasBuff = function(spellID)
 		end
 	end
 	if not fresh then
-		local castName = Normalize(SpellName(spellID) or "")
-		local named = LockRemindersCastNames and LockRemindersCastNames[castName]
-		if castName ~= "" and not castName:find("^spell ", 1, true) and not castName:find("^hechizo ", 1, true) and type(named) == "number" and GetTime() - named < 2.5 and not LockRemindersBuffGone[spellID] then
-			fresh = true
+		local nameKeys = LockRemindersTalentAliasNames and LockRemindersTalentAliasNames(spellID) or {}
+		if #nameKeys == 0 then
+			local castName = Normalize(SpellName(spellID) or "")
+			if castName ~= "" then
+				nameKeys[1] = castName
+			end
+		end
+		for nameIndex = 1, #nameKeys do
+			local named = LockRemindersCastNames and LockRemindersCastNames[nameKeys[nameIndex]]
+			if nameKeys[nameIndex] ~= "" and type(named) == "number" and GetTime() - named < 2.5 and not LockRemindersBuffGone[spellID] then
+				fresh = true
+				break
+			end
 		end
 	end
 	local unknown = false
@@ -2175,12 +2308,21 @@ PlayerHasBuff = function(spellID)
 			unknown = true
 		end
 	end
-	local wanted = Normalize(SpellName(spellID) or "")
-	if wanted ~= "" and not (wanted:find("^hechizo ", 1, true) or wanted:find("^spell ", 1, true)) then
+	local wantedNames = LockRemindersTalentAliasNames and LockRemindersTalentAliasNames(spellID) or {}
+	if #wantedNames == 0 then
+		local wanted = Normalize(SpellName(spellID) or "")
+		if wanted ~= "" and not (wanted:find("^hechizo ", 1, true) or wanted:find("^spell ", 1, true)) then
+			wantedNames[1] = wanted
+		end
+	end
+	if #wantedNames > 0 then
 		local matched = false
 		EachAura(function(_, name)
-			if Normalize(name) == wanted then
-				matched = true
+			local auraKey = Normalize(name or "")
+			for nameIndex = 1, #wantedNames do
+				if auraKey == wantedNames[nameIndex] or (LockRemindersTalentNameMatch and LockRemindersTalentNameMatch(name, wantedNames[nameIndex])) then
+					matched = true
+				end
 			end
 		end)
 		if matched then
@@ -2504,7 +2646,7 @@ local function TalentKey(spellID)
 	end
 	for key in pairs(db.talents) do
 		local savedName = Normalize(SpellName(key) or "")
-		if savedName ~= "" and savedName == wanted then
+		if savedName ~= "" and (savedName == wanted or (LockRemindersTalentNameMatch and LockRemindersTalentNameMatch(savedName, wanted))) then
 			return key
 		end
 	end
@@ -6199,6 +6341,8 @@ end
 LockRemindersProcLooks = {
 	{ "Icon", "icon" },
 	{ "Scythes", "scythes" },
+	{ "Umbra", "umbra" },
+	{ "Stormcall", "stormcall" },
 	{ "Runeblade", "runeblade" },
 	{ "Storm", "storm" },
 	{ "Water", "water" },
@@ -6228,6 +6372,15 @@ LockRemindersProcArt = {
 		{ "ScytheShadow_R", "BLEND", 0.3, 0, 0, 0, 208, 104, "BOTTOM", 0, 62 },
 		{ "ScytheSpirit_R", "ADD", 1, 0.58, 0.42, 1, 208, 104, "BOTTOM", 0, 62 },
 		{ "ScytheRunes_R", "ADD", 1, 0.82, 0.7, 1, 208, 104, "BOTTOM", 0, 62 },
+	},
+	-- HD side overlays from Shadowflare Art (copied into Textures/Procs). White tint keeps native colors.
+	umbra = {
+		{ "umbra", "ADD", 1, 1, 1, 1, 128, 256, "RIGHT", -48, 0 },
+		{ "umbra", "ADD", 1, 1, 1, 1, 128, 256, "LEFT", 48, 0, nil, true },
+	},
+	stormcall = {
+		{ "stormcall", "ADD", 1, 1, 1, 1, 128, 256, "RIGHT", -48, 0 },
+		{ "stormcall", "ADD", 1, 1, 1, 1, 128, 256, "LEFT", 48, 0, nil, true },
 	},
 	runeblade = {
 		{ "RunebladeShadow_L", "BLEND", 0.35, 0, 0, 0, 150, 300, "RIGHT", -130, 0 },
@@ -6473,6 +6626,19 @@ function LockRemindersTalentColor(spellID, which)
 end
 
 function LockRemindersFadeTalent(spellID)
+	if talentMoving then
+		return
+	end
+	if LockRemindersTalentPreviewUntil and GetTime() < LockRemindersTalentPreviewUntil then
+		return
+	end
+	if talentFrame then
+		talentFrame.hold = false
+		if talentFrame.hideTimer then
+			talentFrame.hideTimer:Cancel()
+			talentFrame.hideTimer = nil
+		end
+	end
 	local seconds = LockRemindersTalentFade(spellID)
 	local ornament = LockRemindersTalentOrnament
 	if seconds <= 0 then
@@ -6495,6 +6661,31 @@ function LockRemindersFadeTalent(spellID)
 	elseif talentFrame and not (ornament and ornament:IsShown()) then
 		talentFrame:Hide()
 	end
+end
+
+function LockRemindersClearTalentProc(spellID)
+	if talentMoving then
+		return
+	end
+	if LockRemindersTalentPreviewUntil and GetTime() < LockRemindersTalentPreviewUntil then
+		return
+	end
+	if spellID ~= nil then
+		talentRecent[spellID] = nil
+		talentRecent[tostring(spellID)] = nil
+		local numeric = tonumber(spellID)
+		if numeric then
+			talentRecent[numeric] = nil
+		end
+		if talentSeen then
+			talentSeen[spellID] = false
+			talentSeen[tostring(spellID)] = false
+			if numeric then
+				talentSeen[numeric] = false
+			end
+		end
+	end
+	pcall(LockRemindersFadeTalent, spellID)
 end
 
 function LockRemindersTalentStyle(spellID)
@@ -6728,28 +6919,36 @@ function LockRemindersShowTalentOrnament(style, spellID)
 			tex:SetTexture(file)
 		else
 			tex:SetTexture(media .. file)
+			if not tex:GetTexture() then
+				tex:SetTexture(media .. file .. ".tga")
+			end
 		end
 		if not tex:GetTexture() then
 			tex:Hide()
 		else
 			local red, green, blue = spec[4], spec[5], spec[6]
 			local sum = (red or 0) + (green or 0) + (blue or 0)
-			local white = red > 0.97 and green > 0.97 and blue > 0.97
+			local white = red and green and blue and red > 0.97 and green > 0.97 and blue > 0.97
 			if sum > 0.08 and not white then
-				local gap = math.abs(red - colorDefault[1]) + math.abs(green - colorDefault[2]) + math.abs(blue - colorDefault[3])
+				local gap = math.abs((red or 0) - colorDefault[1]) + math.abs((green or 0) - colorDefault[2]) + math.abs((blue or 0) - colorDefault[3])
 				if gap > 0.08 then
 					red, green, blue = accentRed, accentGreen, accentBlue
 				else
 					red, green, blue = colorRed, colorGreen, colorBlue
 				end
 			end
+			red, green, blue = red or 1, green or 1, blue or 1
 			tex:SetBlendMode(spec[2])
 			tex:SetAlpha(spec[3])
 			tex:SetVertexColor(red, green, blue, 1)
 			tex:SetSize(spec[7] * scale, spec[8] * scale)
 			tex:ClearAllPoints()
 			tex:SetPoint(spec[9], frame, "CENTER", spec[10] * scale, spec[11] * scale)
-			tex:SetTexCoord(0, 1, 0, 1)
+			if spec[13] then
+				tex:SetTexCoord(1, 0, 0, 1)
+			else
+				tex:SetTexCoord(0, 1, 0, 1)
+			end
 			if tex.lookMask and tex.RemoveMaskTexture then
 				tex:RemoveMaskTexture(tex.lookMask)
 				tex.lookMask:Hide()
@@ -6793,27 +6992,28 @@ function ApplyTalentFace(spellID)
 	if talentFrame.ornament then
 		talentFrame.ornament:Hide()
 	end
+	talentFrame.icon:SetTexture(spellID and SpellIcon(spellID) or PreviewTalentIcon())
 	if style ~= "icon" then
+		-- Scythes / art styles: ornament only (no buff icon on top).
 		talentFrame.icon:Hide()
 		if talentFrame.glow then
 			talentFrame.glow:Hide()
-			if talentFrame.glow.plate then
-				talentFrame.glow.plate:Hide()
-			end
 		end
 		LockRemindersShowTalentOrnament(style, spellID)
-		return
-	end
-	LockRemindersHideTalentOrnament()
-	talentFrame.icon:SetDrawLayer("OVERLAY", 7)
-	talentFrame.icon:Show()
-	talentFrame.icon:SetTexture(spellID and SpellIcon(spellID) or PreviewTalentIcon())
-	if talentFrame.glow then
-		talentFrame.glow:Show()
+	else
+		LockRemindersHideTalentOrnament()
+		talentFrame.icon:SetDrawLayer("OVERLAY", 7)
+		talentFrame.icon:Show()
+		if talentFrame.glow then
+			talentFrame.glow:Show()
+		end
 	end
 end
 
 local function PlayTalent(spellID, preview)
+	if not talentFrame then
+		pcall(CreateTalentAlert)
+	end
 	if not talentFrame then
 		return
 	end
@@ -6823,17 +7023,25 @@ local function PlayTalent(spellID, preview)
 	talentFrame.spellID = spellID
 	talentFrame:SetAlpha(1)
 	talentFrame:SetScale(1)
-	if LockRemindersTalentOnScreen() then
+	talentFrame:SetFrameStrata("TOOLTIP")
+	talentFrame:SetFrameLevel(200)
+	local style = LockRemindersTalentStyle(spellID)
+	local ornament = LockRemindersTalentOrnament
+	if style == "icon" then
 		talentFrame:Show()
 	else
 		talentFrame:Hide()
+		if ornament and ornament:IsShown() then
+			ornament:SetFrameStrata("TOOLTIP")
+			ornament:SetFrameLevel(210)
+		end
 	end
 	PlayAlertSound(spellID)
-	if talentFrame.glow.ag then
+	if style == "icon" and talentFrame.glow and talentFrame.glow.ag then
 		talentFrame.glow.ag:Stop()
 		talentFrame.glow.ag:Play()
 	end
-	if talentFrame.pop then
+	if style == "icon" and talentFrame.pop then
 		talentFrame.pop:Stop()
 		talentFrame.pop:Play()
 	end
@@ -6848,9 +7056,28 @@ local function PlayTalent(spellID, preview)
 	end
 	if talentMoving then
 		talentFrame.hold = false
+		LockRemindersTalentPreviewUntil = nil
 		return
 	end
-	local stay = not preview and TalentUntil(spellID)
+	if preview then
+		-- Keep Test visible; Nightfall poll must not wipe it.
+		local hold = TalentHold()
+		if hold < 6 then
+			hold = 6
+		end
+		LockRemindersTalentPreviewUntil = GetTime() + hold
+		talentFrame.hold = false
+		talentFrame.hideTimer = C_Timer.NewTimer(hold, function()
+			LockRemindersTalentPreviewUntil = nil
+			if not talentFrame or talentMoving then
+				return
+			end
+			LockRemindersFadeTalent(talentFrame.spellID)
+		end)
+		return
+	end
+	LockRemindersTalentPreviewUntil = nil
+	local stay = TalentUntil(spellID)
 	talentFrame.hold = stay
 	if stay then
 		return
@@ -6880,6 +7107,7 @@ function ShowTalentPreview(show)
 	local style = LockRemindersTalentStyle(key)
 	talentFrame.spellID = key
 	if talentMoving then
+		LockRemindersTalentPreviewUntil = nil
 		ApplyTalentLook()
 		ApplyTalentPoint()
 		ApplyTalentFace(key)
@@ -6889,14 +7117,20 @@ function ShowTalentPreview(show)
 			talentFrame:Hide()
 			local ornament = LockRemindersTalentOrnament
 			if ornament then
+				ornament.fading = nil
+				ornament.pulse = true
+				ornament.age = 0
+				ornament:SetAlpha(1)
 				ornament:EnableMouse(true)
 				if ornament.hint then
 					ornament.hint:Show()
 				end
+				ornament:Show()
 			end
 		end
 		Print("Drag the animation. Press Done when you finish.")
 	else
+		LockRemindersTalentPreviewUntil = nil
 		ApplyTalentLook()
 		local ornament = LockRemindersTalentOrnament
 		if ornament then
@@ -7038,79 +7272,1032 @@ function ChangeTalentHold(delta)
 	end
 end
 
-function TriggerTalent(spellID, name)
-	if not db or type(db.talents) ~= "table" or not next(db.talents) then
-		return
+function LockRemindersTalentNameMatch(left, right)
+	left = Normalize(left or "")
+	right = Normalize(right or "")
+	if left == "" or right == "" then
+		return false
 	end
-	local key = TalentKey(spellID)
-	if not key and name then
-		local wanted
-		pcall(function()
-			local plain = Plain(name)
-			wanted = plain and Normalize(plain) or nil
-		end)
-		if wanted and wanted ~= "" then
-			for saved in pairs(db.talents) do
-				local savedName = Normalize(SpellName(saved) or "")
-				if savedName == wanted or (wanted == "shadow trance" and savedName == "nightfall") then
-					key = saved
-					break
-				end
+	if left == right then
+		return true
+	end
+	if (left == "shadow trance" or left == "trance de las sombras") and (right == "nightfall" or right == "anochecer" or right == "caida de la noche") then
+		return true
+	end
+	if (right == "shadow trance" or right == "trance de las sombras") and (left == "nightfall" or left == "anochecer" or left == "caida de la noche") then
+		return true
+	end
+	return false
+end
+
+function LockRemindersTalentAliasNames(spellID)
+	spellID = tonumber(spellID)
+	local list = {}
+	local seen = {}
+	local function add(name)
+		name = Normalize(name or "")
+		if name == "" or name:find("^spell ", 1, true) or name:find("^hechizo ", 1, true) or seen[name] then
+			return
+		end
+		seen[name] = true
+		list[#list + 1] = name
+	end
+	if spellID then
+		add(SpellDisplayName(spellID))
+		add(SpellName(spellID))
+		if spellID == 17941 or spellID == 18094 or spellID == 18095 then
+			add("shadow trance")
+			add("nightfall")
+			add("trance de las sombras")
+			add("anochecer")
+			add("caida de la noche")
+		elseif spellID == 34936 then
+			add("backlash")
+			add("contragolpe")
+		end
+	end
+	return list
+end
+
+function LockRemindersTalentKeyFromName(name)
+	if not db or type(db.talents) ~= "table" or name == nil then
+		return nil
+	end
+	local wanted
+	pcall(function()
+		local plain = Plain(name)
+		wanted = Normalize(plain or name)
+	end)
+	if not wanted or wanted == "" or wanted:find("^spell ", 1, true) or wanted:find("^hechizo ", 1, true) then
+		return nil
+	end
+	for saved in pairs(db.talents) do
+		local aliases = LockRemindersTalentAliasNames(saved)
+		for index = 1, #aliases do
+			if aliases[index] == wanted or LockRemindersTalentNameMatch(aliases[index], wanted) then
+				return saved
 			end
 		end
 	end
+	if wanted == "shadow trance" or wanted == "nightfall" or wanted == "trance de las sombras" or wanted == "anochecer" or wanted == "caida de la noche" then
+		if db.talents[17941] ~= nil or db.talents["17941"] ~= nil then
+			return db.talents[17941] ~= nil and 17941 or "17941"
+		end
+	end
+	if wanted == "backlash" or wanted == "contragolpe" then
+		if db.talents[34936] ~= nil or db.talents["34936"] ~= nil then
+			return db.talents[34936] ~= nil and 34936 or "34936"
+		end
+	end
+	return nil
+end
+
+function LockRemindersTalentAlertShowing(spellID)
+	local ornament = LockRemindersTalentOrnament
+	if ornament and ornament:IsShown() then
+		return true
+	end
+	if talentFrame and talentFrame:IsShown() then
+		if spellID == nil or talentFrame.spellID == nil then
+			return true
+		end
+		return talentFrame.spellID == spellID or tostring(talentFrame.spellID) == tostring(spellID)
+	end
+	return false
+end
+
+function TriggerTalent(spellID, name)
+	if not db or type(db.talents) ~= "table" or not next(db.talents) then
+		return false
+	end
+	local key = TalentKey(spellID)
+	if not key and LockRemindersSecret(spellID) then
+		for saved in pairs(db.talents) do
+			local id = tonumber(saved)
+			if id then
+				local aliases = SpellAliases(id)
+				for index = 1, #aliases do
+					if LockRemindersSameSpell(spellID, aliases[index]) then
+						key = saved
+						break
+					end
+				end
+			end
+			if key then
+				break
+			end
+		end
+	end
+	if not key and name then
+		key = LockRemindersTalentKeyFromName(name)
+	end
+	if not key and spellID then
+		key = LockRemindersTalentKeyFromName(SpellName(spellID))
+	end
 	if not key then
-		return
+		return false
 	end
 	local now = GetTime()
-	if talentRecent[key] and now - talentRecent[key] < 1.2 then
-		return
+	local showing = LockRemindersTalentAlertShowing(key)
+	if talentRecent[key] and now - talentRecent[key] < 1.2 and showing then
+		return true
 	end
 	talentRecent[key] = now
 	if talentSeen then
 		talentSeen[key] = true
 	end
+	if not talentFrame then
+		pcall(CreateTalentAlert)
+	end
 	PlayTalent(key)
+	if not LockRemindersTalentAlertShowing(key) then
+		return false
+	end
+	if not LockRemindersTalentProcSaid then
+		LockRemindersTalentProcSaid = true
+		Print("Proc alert ready: " .. (SpellDisplayName(key) or SpellName(key) or tostring(key)))
+	end
+	return true
+end
+
+function LockRemindersTalentFromGlow(spellID)
+	if not db or type(db.talents) ~= "table" or not next(db.talents) then
+		return nil
+	end
+	local key = TalentKey(spellID)
+	if key then
+		return key
+	end
+	local name = Normalize(SpellName(spellID) or "")
+	if name == "" or name:find("^spell ", 1, true) or name:find("^hechizo ", 1, true) then
+		name = ""
+	end
+	local shadowBolts = {
+		[686] = true, [695] = true, [705] = true, [1088] = true, [1106] = true,
+		[7641] = true, [11659] = true, [11660] = true, [11661] = true,
+		[25307] = true, [27209] = true, [47808] = true, [47809] = true,
+	}
+	local plainID = tonumber(spellID)
+	local isBolt = plainID and shadowBolts[plainID]
+	if not isBolt and name ~= "" then
+		isBolt = name:find("shadow bolt", 1, true) or name:find("proyectil de las sombras", 1, true) or name:find("descarga de las sombras", 1, true)
+	end
+	if not isBolt and spellID ~= nil and LockRemindersSameSpell then
+		for boltID in pairs(shadowBolts) do
+			if LockRemindersSameSpell(spellID, boltID) then
+				isBolt = true
+				break
+			end
+		end
+	end
+	local isIncinerate = name:find("incinerate", 1, true) or name:find("incinerar", 1, true)
+	-- Nightfall: Forever lights Shadow Bolt, not the Shadow Trance buff id.
+	if db.talents[17941] ~= nil or db.talents["17941"] ~= nil then
+		if isBolt then
+			return db.talents[17941] ~= nil and 17941 or "17941"
+		end
+		-- Only Shadow Trance configured: any sealed glow is Nightfall.
+		if LockRemindersSecret(spellID) then
+			local count = 0
+			for _ in pairs(db.talents) do
+				count = count + 1
+			end
+			if count == 1 then
+				return db.talents[17941] ~= nil and 17941 or "17941"
+			end
+		end
+	end
+	-- Backlash: Incinerate / Shadow Bolt glow.
+	if db.talents[34936] ~= nil or db.talents["34936"] ~= nil then
+		if isIncinerate or isBolt then
+			return db.talents[34936] ~= nil and 34936 or "34936"
+		end
+	end
+	return nil
+end
+
+function LockRemindersNoteTalentGlow(spellID, show)
+	local key = LockRemindersTalentFromGlow(spellID)
+	if not key then
+		return false
+	end
+	if show then
+		LockRemindersStampBuff(key)
+		return TriggerTalent(key, SpellName(key)) and true or false
+	end
+	if talentFrame and talentFrame.hold and (talentFrame.spellID == key or tostring(talentFrame.spellID) == tostring(key)) then
+		talentFrame.hold = false
+		LockRemindersFadeTalent(key)
+	elseif LockRemindersTalentAlertShowing(key) then
+		LockRemindersFadeTalent(key)
+	end
+	if talentSeen then
+		talentSeen[key] = false
+	end
+	return true
+end
+
+function LockRemindersReadTalentChat(line)
+	if type(line) ~= "string" or line == "" or not db or type(db.talents) ~= "table" or not next(db.talents) then
+		return
+	end
+	local gain = line:match("^You gain ([^%.%!]+)")
+		or line:match(" gains ([^%.%!]+)%.?$")
+		or line:match("^You acquire ([^%.%!]+)")
+		or line:match(" receives ([^%.%!]+)%.?$")
+	if not gain then
+		return
+	end
+	gain = gain:gsub("%s*%b()%s*$", ""):gsub("^%s+", ""):gsub("%s+$", "")
+	local key = LockRemindersTalentKeyFromName(gain)
+	if not key then
+		return
+	end
+	LockRemindersStampBuff(key)
+	LockRemindersCastNames = LockRemindersCastNames or {}
+	local aliases = LockRemindersTalentAliasNames(key)
+	local now = GetTime()
+	for index = 1, #aliases do
+		LockRemindersCastNames[aliases[index]] = now
+	end
+	pcall(TriggerTalent, key, gain)
+end
+
+function LockRemindersFindTalentBuff(spellID)
+	if not spellID or not db or type(db.talents) ~= "table" then
+		return false
+	end
+	local saved = TalentKey(spellID) or spellID
+	local aliases = SpellAliases(tonumber(spellID) or spellID)
+	-- Same path Demon Skin uses: sealed aura object still means "present".
+	if C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID then
+		for index = 1, #aliases do
+			local ok, aura = pcall(C_UnitAuras.GetPlayerAuraBySpellID, aliases[index])
+			if ok and aura ~= nil and aura ~= false then
+				return true
+			end
+		end
+	end
+	if C_UnitAuras and C_UnitAuras.GetAuraDataBySpellID then
+		for index = 1, #aliases do
+			local ok, aura = pcall(C_UnitAuras.GetAuraDataBySpellID, "player", aliases[index], "HELPFUL")
+			if ok and aura ~= nil and aura ~= false then
+				return true
+			end
+		end
+	end
+	-- Classic WeakAura style: find by name (Forever may remap the buff id).
+	local names = {}
+	local function addName(value)
+		if type(value) ~= "string" or value == "" then
+			return
+		end
+		names[#names + 1] = value
+	end
+	addName(SpellDisplayName(saved))
+	addName(SpellName(saved))
+	local sid = tonumber(saved)
+	if sid == 17941 or sid == 18094 or sid == 18095 then
+		addName("Shadow Trance")
+		addName("Nightfall")
+		addName("Trance de las Sombras")
+		addName("Anochecer")
+		addName("Caida de la Noche")
+		addName("Caída de la Noche")
+	end
+	if AuraUtil and AuraUtil.FindAuraByName then
+		for index = 1, #names do
+			local ok, found, icon = pcall(AuraUtil.FindAuraByName, names[index], "player", "HELPFUL")
+			if ok and found ~= nil and found ~= false then
+				return true
+			end
+			if ok and icon ~= nil and not LockRemindersSecret(icon) and LockRemindersIconsMatch(icon, SpellIcon(saved)) then
+				return true
+			end
+		end
+	end
+	-- Classic ShadowTranceAlert: match buff texture even when name/id are sealed.
+	local wantIcon = SpellIcon(saved)
+	local wantPath = "Interface\\Icons\\Spell_Shadow_Twilight"
+	if type(UnitBuff) == "function" then
+		for index = 1, 40 do
+			local packed = { pcall(UnitBuff, "player", index) }
+			if not packed[1] then
+				break
+			end
+			local name = packed[2]
+			if name == nil or name == false then
+				if not (issecretvalue and issecretvalue(name)) then
+					break
+				end
+			end
+			for nameIndex = 1, #names do
+				if type(name) == "string" and not LockRemindersSecret(name) then
+					if Normalize(name) == Normalize(names[nameIndex]) or (LockRemindersTalentNameMatch and LockRemindersTalentNameMatch(name, names[nameIndex])) then
+						return true
+					end
+				end
+			end
+			for slot = 3, #packed do
+				local value = packed[slot]
+				if value ~= nil and not LockRemindersSecret(value) then
+					if LockRemindersIconsMatch(value, wantIcon) or LockRemindersIconsMatch(value, wantPath) then
+						return true
+					end
+					local numeric = tonumber(value)
+					if numeric then
+						for aliasIndex = 1, #aliases do
+							if numeric == aliases[aliasIndex] then
+								return true
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	if type(GetPlayerBuffTexture) == "function" and type(GetPlayerBuff) == "function" then
+		for index = 0, 40 do
+			local okBuff, buff = pcall(GetPlayerBuff, index, "HELPFUL")
+			if okBuff and buff and buff ~= 0 then
+				local okTex, texture = pcall(GetPlayerBuffTexture, buff)
+				if okTex and texture and not LockRemindersSecret(texture) then
+					if LockRemindersIconsMatch(texture, wantIcon) or LockRemindersIconsMatch(texture, wantPath) then
+						return true
+					end
+				end
+			end
+		end
+	end
+	return false
 end
 
 function WatchTalents(prime)
-	if not db or type(db.talents) ~= "table" then
+	if not db or type(db.talents) ~= "table" or not next(db.talents) then
 		return
 	end
-	local now = {}
+	-- WeakAura-style: one light pass. No nested aura scans (those hit the script time limit).
+	local present = {}
+	local function mark(key)
+		if key == nil then
+			return
+		end
+		present[key] = true
+		present[tostring(key)] = true
+		local numeric = tonumber(key)
+		if numeric then
+			present[numeric] = true
+		end
+	end
 	for spellID in pairs(db.talents) do
-		local has = PlayerHasBuff(spellID)
-		if has == false and Normalize(SpellName(spellID) or "") == "nightfall" then
-			local trance = false
-			EachAura(function(_, auraName)
-				if Normalize(auraName or "") == "shadow trance" then
-					trance = true
+		local id = tonumber(spellID) or spellID
+		local aliases = SpellAliases(id)
+		if C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID then
+			for index = 1, #aliases do
+				local ok, aura = pcall(C_UnitAuras.GetPlayerAuraBySpellID, aliases[index])
+				if ok and aura ~= nil and aura ~= false then
+					mark(spellID)
+					break
 				end
-			end)
-			if trance then
-				has = true
 			end
 		end
-		if has == true then
-			now[spellID] = true
-			if not prime and talentSeen and not talentSeen[spellID] then
-				TriggerTalent(spellID)
-			end
-		elseif has == false then
-			now[spellID] = false
-			local ornamentShown = LockRemindersTalentOrnament and LockRemindersTalentOrnament:IsShown()
-			if talentFrame and talentFrame.hold and not talentMoving and (talentFrame:IsShown() or ornamentShown) then
-				local shown = talentFrame.spellID
-				if shown == spellID or tostring(shown) == tostring(spellID) then
-					talentFrame.hold = false
-					LockRemindersFadeTalent(shown)
+		if not present[spellID] and C_UnitAuras and C_UnitAuras.GetAuraDataBySpellID then
+			for index = 1, #aliases do
+				local ok, aura = pcall(C_UnitAuras.GetAuraDataBySpellID, "player", aliases[index], "HELPFUL")
+				if ok and aura ~= nil and aura ~= false then
+					mark(spellID)
+					break
 				end
 			end
-		elseif talentSeen and talentSeen[spellID] then
+		end
+		if not present[spellID] and LockRemindersFindTalentBuff(spellID) then
+			mark(spellID)
+		end
+	end
+	if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
+		for index = 1, 40 do
+			local ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, "player", index, "HELPFUL")
+			if not ok or aura == nil or aura == false then
+				break
+			end
+			local key = LockRemindersMatchTalentAura(aura)
+			if key then
+				mark(key)
+				if not prime then
+					pcall(LockRemindersNoteTalentAura, aura)
+				end
+			end
+		end
+	end
+	local clock = GetTime()
+	local now = {}
+	for spellID in pairs(db.talents) do
+		local has = present[spellID] and true or false
+		local nightfall = spellID == 17941 or tostring(spellID) == "17941"
+		-- Nightfall with cast-time tracking: trust cast time, not a 12s latch.
+		if nightfall and LockRemindersSBCastBase and LockRemindersNightfallFromCastTime() then
+			has = true
+			mark(spellID)
+		elseif not has then
+			local recent = talentRecent[spellID] or talentRecent[tostring(spellID)] or talentRecent[tonumber(spellID)]
+			if recent and clock - recent < 1.5 then
+				has = true
+				mark(spellID)
+			end
+		end
+		if nightfall and LockRemindersSBCastBase and not LockRemindersNightfallFromCastTime() then
+			has = false
+		end
+		if has then
 			now[spellID] = true
+			if not prime and not talentMoving and not (LockRemindersTalentPreviewUntil and GetTime() < LockRemindersTalentPreviewUntil) and not LockRemindersTalentAlertShowing(spellID) then
+				LockRemindersStampBuff(spellID)
+				pcall(TriggerTalent, spellID)
+			end
+		else
+			now[spellID] = false
+			if not prime and not talentMoving and not (LockRemindersTalentPreviewUntil and GetTime() < LockRemindersTalentPreviewUntil) and LockRemindersTalentAlertShowing(spellID) then
+				pcall(LockRemindersClearTalentProc, spellID)
+			end
 		end
 	end
 	talentSeen = now
+end
+
+function LockRemindersIconKey(icon)
+	if icon == nil or LockRemindersSecret(icon) then
+		return nil
+	end
+	local text = tostring(icon):lower():gsub("\\", "/")
+	text = text:gsub("%.blp$", ""):gsub("%.tga$", "")
+	local file = text:match("interface/icons/(.+)$") or text:match("/icons/(.+)$")
+	if file then
+		return file
+	end
+	if GetFileIDFromPath and type(icon) == "string" then
+		local ok, fileID = pcall(GetFileIDFromPath, icon)
+		if ok and fileID and not LockRemindersSecret(fileID) then
+			return tostring(fileID)
+		end
+	end
+	return text
+end
+
+function LockRemindersIconsMatch(left, right)
+	local a = LockRemindersIconKey(left)
+	local b = LockRemindersIconKey(right)
+	if not a or not b then
+		return false
+	end
+	if a == b then
+		return true
+	end
+	return a:find(b, 1, true) ~= nil or b:find(a, 1, true) ~= nil
+end
+
+function LockRemindersMatchTalentAura(data, texture)
+	if not db or type(db.talents) ~= "table" or not next(db.talents) then
+		return nil
+	end
+	local auraID, auraName, auraIcon, auraDuration, auraHelpful
+	if data ~= nil then
+		pcall(function()
+			auraID = data.spellId or data.spellID
+			auraName = data.name
+			auraIcon = data.icon
+			auraDuration = data.duration
+			auraHelpful = data.isHelpful
+		end)
+	end
+	if (auraIcon == nil or LockRemindersSecret(auraIcon)) and texture ~= nil and not LockRemindersSecret(texture) then
+		auraIcon = texture
+	end
+	local nightfallKey
+	if db.talents[17941] ~= nil then
+		nightfallKey = 17941
+	elseif db.talents["17941"] ~= nil then
+		nightfallKey = "17941"
+	end
+	local function nightfallIcon(icon)
+		if icon == nil or LockRemindersSecret(icon) then
+			return false
+		end
+		if nightfallKey and LockRemindersIconsMatch(icon, SpellIcon(nightfallKey)) then
+			return true
+		end
+		local text = LockRemindersIconKey(icon) or ""
+		if text == "136213" or text == "136214" or text == "136216" or text == "136223" then
+			return true
+		end
+		if text:find("spell_shadow_twilight", 1, true) then
+			return true
+		end
+		if text:find("spell_shadow_shadowworddominate", 1, true) then
+			return true
+		end
+		if text:find("spell_shadow_siphonmana", 1, true) then
+			return true
+		end
+		return text:find("ability_warlock_shadowflame", 1, true) and true or false
+	end
+	if auraID ~= nil and not LockRemindersSecret(auraID) then
+		local key = TalentKey(auraID)
+		if key then
+			return key
+		end
+		if LockRemindersSameSpell then
+			for saved in pairs(db.talents) do
+				local sid = tonumber(saved)
+				if sid then
+					local aliases = SpellAliases(sid)
+					for index = 1, #aliases do
+						if LockRemindersSameSpell(auraID, aliases[index]) then
+							return saved
+						end
+					end
+				end
+			end
+		end
+	end
+	if type(auraName) == "string" and auraName ~= "" and not LockRemindersSecret(auraName) then
+		local key = LockRemindersTalentKeyFromName(auraName)
+		if key then
+			return key
+		end
+	end
+	if auraIcon ~= nil and not LockRemindersSecret(auraIcon) then
+		for saved in pairs(db.talents) do
+			local sid = tonumber(saved) or saved
+			if LockRemindersIconsMatch(auraIcon, SpellIcon(sid)) then
+				return saved
+			end
+		end
+		if nightfallKey and nightfallIcon(auraIcon) then
+			return nightfallKey
+		end
+	end
+	-- Forever seals short talent procs ("buff hidden by the game" in OneForAll).
+	-- Duration may read as 0 / garbage while the icon still paints — if Nightfall is the
+	-- only configured proc, any sealed helpful aura is treated as Shadow Trance.
+	if nightfallKey and data ~= nil and auraHelpful ~= false then
+		local sealed = LockRemindersSecret(auraID)
+			or LockRemindersSecret(auraName)
+			or LockRemindersSecret(auraDuration)
+			or LockRemindersSecret(auraIcon)
+		local count = 0
+		for _ in pairs(db.talents) do
+			count = count + 1
+		end
+		local short = LockRemindersSecret(auraDuration)
+			or (type(auraDuration) == "number" and auraDuration > 0 and auraDuration <= 15)
+			or (auraDuration == nil and sealed)
+			or (type(auraDuration) == "number" and auraDuration == 0 and sealed)
+		if sealed and (count == 1 or short or nightfallIcon(auraIcon)) then
+			return nightfallKey
+		end
+	end
+	return nil
+end
+
+function LockRemindersNoteTalentAura(data, texture)
+	local key = LockRemindersMatchTalentAura(data, texture)
+	if not key then
+		return false
+	end
+	LockRemindersStampBuff(key)
+	if LockRemindersTalentAlertShowing(key) then
+		return true
+	end
+	return TriggerTalent(key) and true or false
+end
+
+function LockRemindersSpellIsOverlayed(spellID)
+	spellID = tonumber(spellID)
+	if not spellID then
+		return false
+	end
+	local fn = C_SpellActivationOverlay and C_SpellActivationOverlay.IsSpellOverlayed or IsSpellOverlayed
+	if type(fn) ~= "function" then
+		return false
+	end
+	local ok, on = pcall(fn, spellID)
+	if not ok or on == nil or LockRemindersSecret(on) then
+		return false
+	end
+	return on and true or false
+end
+
+-- Shadowflare's Forever path: buffs are hidden in combat, but Shadow Bolt's cast time
+-- drops to 0 while Shadow Trance is up. Learn the normal cast time first, then trust a 0.
+function LockRemindersShadowBoltCastTime()
+	local ranks = {
+		47809, 47808, 27209, 25307, 11661, 11660, 11659, 7641, 1106, 1088, 705, 695, 686,
+	}
+	local function known(id)
+		if IsPlayerSpell then
+			local ok, value = pcall(IsPlayerSpell, id)
+			if ok and value then
+				return true
+			end
+		end
+		if IsSpellKnown then
+			local ok, value = pcall(IsSpellKnown, id)
+			if ok and value then
+				return true
+			end
+		end
+		return false
+	end
+	local function castMs(id)
+		if GetSpellInfo then
+			local ok, _, _, _, castTime = pcall(GetSpellInfo, id)
+			if ok and castTime ~= nil and not LockRemindersSecret(castTime) then
+				castTime = tonumber(castTime)
+				if castTime then
+					return castTime
+				end
+			end
+		end
+		if C_Spell and C_Spell.GetSpellInfo then
+			local ok, info = pcall(C_Spell.GetSpellInfo, id)
+			if ok and type(info) == "table" and info.castTime ~= nil and not LockRemindersSecret(info.castTime) then
+				return tonumber(info.castTime)
+			end
+		end
+	end
+	for index = 1, #ranks do
+		local id = ranks[index]
+		if known(id) then
+			local ct = castMs(id)
+			if ct ~= nil then
+				return ct, id
+			end
+		end
+	end
+	for index = 1, #ranks do
+		local ct = castMs(ranks[index])
+		if ct ~= nil then
+			return ct, ranks[index]
+		end
+	end
+end
+
+function LockRemindersNightfallFromCastTime()
+	local ct = LockRemindersShadowBoltCastTime()
+	if ct == nil then
+		return false
+	end
+	if ct > 0 then
+		LockRemindersSBCastBase = ct
+		return false
+	end
+	-- Instant only after a normal cast time was seen (Shadowflare CheckInstant).
+	return LockRemindersSBCastBase ~= nil
+end
+
+function LockRemindersPollTalentOverlay()
+	if not db or type(db.talents) ~= "table" or not next(db.talents) then
+		return
+	end
+	local nightfallKey
+	if db.talents[17941] ~= nil then
+		nightfallKey = 17941
+	elseif db.talents["17941"] ~= nil then
+		nightfallKey = "17941"
+	end
+	local bolts = {
+		[686] = true, [695] = true, [705] = true, [1088] = true, [1106] = true,
+		[7641] = true, [11659] = true, [11660] = true, [11661] = true,
+		[25307] = true, [27209] = true, [47808] = true, [47809] = true,
+	}
+	-- Forever: Shadowflare finds Trance via Shadow Bolt cast time → 0 in combat.
+	if nightfallKey then
+		-- Test/Move preview must stay until Done (or Test timer ends).
+		if talentMoving or (LockRemindersTalentPreviewUntil and GetTime() < LockRemindersTalentPreviewUntil) then
+			return
+		end
+		local instant = LockRemindersNightfallFromCastTime()
+		local showing = LockRemindersTalentAlertShowing(nightfallKey)
+		if instant then
+			if not showing then
+				LockRemindersStampBuff(nightfallKey)
+				pcall(TriggerTalent, nightfallKey)
+			end
+			return
+		end
+		-- Cast time restored: Trance is over. Clear even with untilEnd (Shadowflare).
+		if showing and LockRemindersSBCastBase then
+			local ornament = LockRemindersTalentOrnament
+			if not (ornament and ornament.fading) then
+				pcall(LockRemindersClearTalentProc, nightfallKey)
+			end
+			return
+		end
+		-- Before cast-time baseline exists, fall back to aura / overlay.
+		if not LockRemindersSBCastBase then
+			if LockRemindersFindTalentBuff(nightfallKey) then
+				LockRemindersStampBuff(nightfallKey)
+				pcall(TriggerTalent, nightfallKey)
+				return
+			end
+			for boltID in pairs(bolts) do
+				if LockRemindersSpellIsOverlayed(boltID) then
+					LockRemindersStampBuff(nightfallKey)
+					pcall(TriggerTalent, nightfallKey)
+					return
+				end
+			end
+		end
+		return
+	end
+	for saved in pairs(db.talents) do
+		if not LockRemindersTalentAlertShowing(saved) then
+			if LockRemindersFindTalentBuff(saved) then
+				LockRemindersStampBuff(saved)
+				pcall(TriggerTalent, saved)
+			end
+			local sid = tonumber(saved)
+			if sid and LockRemindersSpellIsOverlayed(sid) then
+				LockRemindersStampBuff(saved)
+				pcall(TriggerTalent, saved)
+			end
+		end
+	end
+end
+
+function LockRemindersOnlyNightfall()
+	if not db or type(db.talents) ~= "table" then
+		return nil
+	end
+	if db.talents[17941] == nil and db.talents["17941"] == nil then
+		return nil
+	end
+	local count = 0
+	for _ in pairs(db.talents) do
+		count = count + 1
+	end
+	if count ~= 1 then
+		return nil
+	end
+	return db.talents[17941] ~= nil and 17941 or "17941"
+end
+
+function LockRemindersHookBuffTexture(tex)
+	if not tex or tex.lrTalentHook or type(tex.SetTexture) ~= "function" then
+		return
+	end
+	tex.lrTalentHook = true
+	hooksecurefunc(tex, "SetTexture", function(_, asset)
+		if asset == nil then
+			return
+		end
+		-- Forever can seal the file id and still paint the buff on the bar.
+		if LockRemindersSecret(asset) then
+			local key = LockRemindersOnlyNightfall()
+			if key then
+				LockRemindersStampBuff(key)
+				pcall(TriggerTalent, key)
+			end
+			return
+		end
+		pcall(LockRemindersNoteTalentAura, nil, asset)
+	end)
+end
+
+function LockRemindersHookElvUIAuras()
+	if LockRemindersElvAuraHooked then
+		return
+	end
+	local ok, E = pcall(function()
+		return ElvUI and ElvUI[1]
+	end)
+	if not ok or not E or not E.GetModule then
+		return
+	end
+	local got, A = pcall(E.GetModule, E, "Auras")
+	if not got or not A or type(A.UpdateAura) ~= "function" then
+		return
+	end
+	LockRemindersElvAuraHooked = true
+	hooksecurefunc(A, "UpdateAura", function(_, button)
+		if not button or not db or type(db.talents) ~= "table" then
+			return
+		end
+		if button.filter and button.filter ~= "HELPFUL" then
+			return
+		end
+		local texture
+		if button.texture and button.texture.GetTexture then
+			texture = button.texture:GetTexture()
+		end
+		LockRemindersHookBuffTexture(button.texture)
+		local noted = LockRemindersNoteTalentAura(button.aura or button.auraInfo or button.data, texture)
+		if noted then
+			return
+		end
+		local key = LockRemindersOnlyNightfall()
+		if not key then
+			return
+		end
+		local dur = button.duration
+		local sealedDur = LockRemindersSecret(dur)
+		local short = sealedDur or (type(dur) == "number" and dur > 0 and dur <= 15) or (type(dur) == "number" and dur == 0 and LockRemindersSecret(texture))
+		local sealedTex = LockRemindersSecret(texture)
+		if short or sealedTex or (button.aura and (LockRemindersSecret(button.aura.spellId) or LockRemindersSecret(button.aura.name))) then
+			LockRemindersStampBuff(key)
+			pcall(TriggerTalent, key)
+		end
+	end)
+end
+
+function LockRemindersScanBuffButtons()
+	if not db or type(db.talents) ~= "table" or not next(db.talents) then
+		return
+	end
+	local function readButton(button)
+		if not button then
+			return
+		end
+		local shown = true
+		if button.IsShown then
+			shown = button:IsShown()
+		end
+		if not shown then
+			return
+		end
+		local icon = button.texture or button.Icon or button.icon
+		if type(icon) == "table" then
+			LockRemindersHookBuffTexture(icon)
+			local texture
+			if icon.GetTexture then
+				texture = icon:GetTexture()
+			end
+			pcall(LockRemindersNoteTalentAura, button.auraInfo or button.aura or button.data, texture)
+			return
+		end
+		-- Fallback only when the button has no .texture field.
+		if button.GetRegions then
+			local regions = { button:GetRegions() }
+			for index = 1, #regions do
+				local region = regions[index]
+				if region and region.GetObjectType and region:GetObjectType() == "Texture" and region.GetTexture then
+					LockRemindersHookBuffTexture(region)
+					local texture = region:GetTexture()
+					if texture ~= nil and not LockRemindersSecret(texture) then
+						pcall(LockRemindersNoteTalentAura, nil, texture)
+					end
+				end
+			end
+		end
+	end
+	local function readFrame(frame, depth)
+		if not frame or not frame.GetChildren then
+			return
+		end
+		depth = depth or 0
+		if depth > 2 then
+			return
+		end
+		local children = { frame:GetChildren() }
+		for index = 1, #children do
+			readButton(children[index])
+			if depth < 2 then
+				readFrame(children[index], depth + 1)
+			end
+		end
+	end
+	for index = 1, 40 do
+		readButton(_G["BuffButton" .. index])
+		readButton(_G["AuraButton" .. index])
+		readButton(_G["TempEnchant" .. index])
+	end
+	local frame = _G.BuffFrame
+	if frame and frame.auraContainer then
+		readFrame(frame.auraContainer, 0)
+	else
+		readFrame(frame, 0)
+	end
+	-- ElvUI kills BuffFrame; read its header icons (texture paths stay readable).
+	readFrame(_G.ElvUIPlayerBuffs, 0)
+	readFrame(_G.ElvUIPlayerBuffs and _G.ElvUIPlayerBuffs.auraHeader, 0)
+end
+
+function LockRemindersQueueTalentScan()
+	pcall(LockRemindersPollTalentOverlay)
+	-- One delayed buff walk is enough; triple scans were burning memory.
+	if C_Timer and C_Timer.After then
+		C_Timer.After(0.15, function()
+			pcall(LockRemindersScanBuffButtons)
+			pcall(LockRemindersPollTalentOverlay)
+		end)
+	else
+		pcall(LockRemindersScanBuffButtons)
+	end
+end
+
+function LockRemindersStartTalentWatch()
+	-- Cast-time poll is cheap. Buff-button walks allocate; keep them rare.
+	pcall(LockRemindersHookElvUIAuras)
+	if LockRemindersTalentTicker then
+		LockRemindersTalentTicker:Cancel()
+		LockRemindersTalentTicker = nil
+	end
+	if not C_Timer or not C_Timer.NewTicker then
+		return
+	end
+	LockRemindersTalentTicker = C_Timer.NewTicker(0.4, function()
+		if not db or type(db.talents) ~= "table" or not next(db.talents) then
+			return
+		end
+		pcall(LockRemindersPollTalentOverlay)
+		-- Fallback scan only before Shadow Bolt cast-time baseline exists.
+		if not LockRemindersSBCastBase then
+			local now = GetTime()
+			if not LockRemindersTalentScanAt or now - LockRemindersTalentScanAt >= 2 then
+				LockRemindersTalentScanAt = now
+				pcall(LockRemindersScanBuffButtons)
+			end
+		end
+	end)
+end
+
+function LockRemindersDumpProcs()
+	Print("Proc dump (while Shadow Trance is up):")
+	local key = LockRemindersOnlyNightfall() or 17941
+	local ct, bolt = LockRemindersShadowBoltCastTime()
+	Print("Shadow Bolt castTime=" .. tostring(ct) .. "ms id=" .. tostring(bolt) .. " base=" .. tostring(LockRemindersSBCastBase) .. " instant=" .. tostring(LockRemindersNightfallFromCastTime()))
+	Print("FindTalentBuff: " .. tostring(LockRemindersFindTalentBuff(key)))
+	if AuraUtil and AuraUtil.FindAuraByName then
+		local names = { "Shadow Trance", "Nightfall", "Trance de las Sombras", "Anochecer" }
+		for index = 1, #names do
+			local ok, found, icon = pcall(AuraUtil.FindAuraByName, names[index], "player", "HELPFUL")
+			Print("FindAura " .. names[index] .. ": ok=" .. tostring(ok) .. " found=" .. tostring(found) .. (LockRemindersSecret(found) and "(secret)" or "") .. " icon=" .. tostring(icon))
+		end
+	end
+	for _, id in ipairs({ 17941, 18094, 18095 }) do
+		local ok, aura = false, nil
+		if C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID then
+			ok, aura = pcall(C_UnitAuras.GetPlayerAuraBySpellID, id)
+		end
+		Print("GetPlayerAuraBySpellID " .. id .. ": " .. tostring(ok and aura ~= nil and aura ~= false) .. (aura ~= nil and LockRemindersSecret(aura) and " (sealed obj)" or ""))
+	end
+	local bolts = { 686, 695, 705, 1088, 1106, 7641, 11659, 11660, 11661, 25307, 27209 }
+	local overlayed = false
+	for index = 1, #bolts do
+		if LockRemindersSpellIsOverlayed(bolts[index]) then
+			overlayed = true
+			Print("Overlayed bolt: " .. bolts[index])
+		end
+	end
+	if not overlayed then
+		Print("No Shadow Bolt overlay via IsSpellOverlayed.")
+	end
+	local found = 0
+	if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
+		for index = 1, 40 do
+			local ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, "player", index, "HELPFUL")
+			if not ok or aura == nil or aura == false then
+				break
+			end
+			found = found + 1
+			local id, name, icon, dur
+			pcall(function()
+				id = aura.spellId or aura.spellID
+				name = aura.name
+				icon = aura.icon
+				dur = aura.duration
+			end)
+			local bits = {
+				"#" .. index,
+				"id=" .. tostring(id) .. (LockRemindersSecret(id) and "(secret)" or ""),
+				"name=" .. tostring(name) .. (LockRemindersSecret(name) and "(secret)" or ""),
+				"icon=" .. tostring(icon) .. (LockRemindersSecret(icon) and "(secret)" or ""),
+				"dur=" .. tostring(dur) .. (LockRemindersSecret(dur) and "(secret)" or ""),
+				"match=" .. tostring(LockRemindersMatchTalentAura(aura)),
+			}
+			Print(table.concat(bits, " "))
+		end
+	end
+	Print("Readable aura slots: " .. found)
+	local header = _G.ElvUIPlayerBuffs
+	if header and header.GetChildren then
+		local children = { header:GetChildren() }
+		local shown = 0
+		for index = 1, #children do
+			local button = children[index]
+			if button and button.IsShown and button:IsShown() then
+				shown = shown + 1
+				local tex = button.texture or button.icon or button.Icon
+				local asset = tex and tex.GetTexture and tex:GetTexture()
+				Print("ElvBuff" .. shown .. " icon=" .. tostring(asset) .. (LockRemindersSecret(asset) and "(secret)" or "") .. " dur=" .. tostring(button.duration) .. (LockRemindersSecret(button.duration) and "(secret)" or "") .. " match=" .. tostring(LockRemindersMatchTalentAura(button.aura, asset)))
+			end
+		end
+		Print("ElvUI buff buttons shown: " .. shown)
+	else
+		Print("ElvUIPlayerBuffs not found.")
+	end
+	Print("ElvUI UpdateAura hooked: " .. tostring(LockRemindersElvAuraHooked and true or false))
+	Print("/lr proc still previews the animation.")
 end
 
 function LockRemindersLayoutItemAlert()
@@ -7982,6 +9169,33 @@ function LockRemindersCDTriggerFlash(icon)
 	end
 end
 
+function LockRemindersCDBaseDuration(spellID)
+	spellID = tonumber(spellID)
+	if not spellID then
+		return nil
+	end
+	if GetSpellBaseCooldown then
+		local ok, ms = pcall(GetSpellBaseCooldown, spellID)
+		ms = ok and tonumber(ms) or nil
+		if ms and not LockRemindersSecret(ms) and ms >= 3000 then
+			return ms / 1000
+		end
+	end
+	if C_Spell and C_Spell.GetSpellCooldownInfo then
+		local ok, info = pcall(C_Spell.GetSpellCooldownInfo, spellID)
+		if ok and type(info) == "table" and not LockRemindersSecret(info) then
+			local ms = tonumber(info.durationMs or info.duration)
+			if ms and not LockRemindersSecret(ms) and ms >= 3000 then
+				return ms / 1000
+			end
+		end
+	end
+	-- Forever may hide live CD numbers in combat; keep known long racials usable.
+	if spellID == 7744 then
+		return 120
+	end
+end
+
 function LockRemindersCDReadSpell(spellID)
 	spellID = tonumber(spellID)
 	if not spellID then
@@ -8003,29 +9217,55 @@ function LockRemindersCDReadSpell(spellID)
 		end
 		return plain(first), plain(second)
 	end
-	local start, duration
+	local function fromRaw(first, second)
+		local start, duration = read(first, second)
+		if type(start) == "number" and type(duration) == "number" and duration > 1.5 and start > 0 then
+			local left = start + duration - GetTime()
+			if left > 0 then
+				return left, duration, start
+			end
+		end
+		local rawStart, rawDuration = first, second
+		if type(first) == "table" and not LockRemindersSecret(first) then
+			rawStart = first.startTime or first.start
+			rawDuration = first.duration
+		end
+		if rawStart == nil or rawDuration == nil then
+			return
+		end
+		if not LockRemindersSecret(rawStart) and not LockRemindersSecret(rawDuration) then
+			return
+		end
+		local ok, left = pcall(function()
+			return rawStart + rawDuration - GetTime()
+		end)
+		if not ok or type(left) ~= "number" or LockRemindersSecret(left) or left <= 0 then
+			return
+		end
+		local base = LockRemindersCDBaseDuration(spellID)
+		if base and left <= base + 1.5 then
+			return left, base, GetTime() - (base - left)
+		end
+		if left > 1.5 then
+			return left, left, GetTime()
+		end
+	end
 	if C_Spell and C_Spell.GetSpellCooldown then
 		local ok, first, second = pcall(C_Spell.GetSpellCooldown, spellID)
 		if ok then
-			local readOk, nextStart, nextDuration = pcall(read, first, second)
-			if readOk then
-				start, duration = nextStart, nextDuration
+			local left, duration, start = fromRaw(first, second)
+			if left then
+				return left, duration, start
 			end
 		end
 	end
-	if (type(duration) ~= "number" or duration <= 1.5) and GetSpellCooldown then
+	if GetSpellCooldown then
 		local ok, first, second = pcall(GetSpellCooldown, spellID)
 		if ok then
-			local readOk, nextStart, nextDuration = pcall(read, first, second)
-			if readOk and type(nextDuration) == "number" then
-				start, duration = nextStart, nextDuration
+			local left, duration, start = fromRaw(first, second)
+			if left then
+				return left, duration, start
 			end
-		end
-	end
-	if type(start) == "number" and type(duration) == "number" and duration > 1.5 and start > 0 then
-		local left = start + duration - GetTime()
-		if left > 0 then
-			return left, duration, start
 		end
 	end
 end
@@ -8745,7 +9985,7 @@ function LockRemindersStartCDManager()
 	if LockRemindersCD.ticker then
 		return
 	end
-	LockRemindersCD.ticker = C_Timer.NewTicker(0.2, function()
+	LockRemindersCD.ticker = C_Timer.NewTicker(0.35, function()
 		if LockRemindersCD.moving then
 			LockRemindersCDLayout()
 			return
@@ -8765,13 +10005,40 @@ function LockRemindersStartCDManager()
 	end)
 end
 
+function LockRemindersCDStampCast(spellID)
+	spellID = tonumber(spellID)
+	if not spellID or not LockRemindersCDSpellSaved(spellID) then
+		return false
+	end
+	local state = LockRemindersCDEnsureState("spell", spellID, SpellName(spellID), SpellIcon(spellID))
+	local left, duration, start = LockRemindersCDReadSpell(spellID)
+	if not left then
+		duration = LockRemindersCDBaseDuration(spellID)
+		if duration then
+			start = GetTime()
+			left = duration
+		end
+	end
+	if not left or left <= 0 then
+		LockRemindersCDPollCooldown(state, left, duration, start)
+		return false
+	end
+	LockRemindersCDMarkCooling(state, left, duration, start)
+	return true
+end
+
 function LockRemindersNoteCDCast(unit, arg2, arg3, arg4)
 	if unit ~= "player" or not db or type(db.cdSpells) ~= "table" then
 		return
 	end
 	local castID
+	local secrets = {}
 	local function take(value)
-		if value == nil or LockRemindersSecret(value) then
+		if value == nil then
+			return
+		end
+		if LockRemindersSecret(value) then
+			secrets[#secrets + 1] = value
 			return
 		end
 		if type(value) == "number" then
@@ -8788,17 +10055,38 @@ function LockRemindersNoteCDCast(unit, arg2, arg3, arg4)
 	take(arg2)
 	take(arg3)
 	take(arg4)
+	if not castID and #secrets > 0 then
+		for key in pairs(db.cdSpells) do
+			local saved = tonumber(key)
+			if saved and (db.cdSpells[key] == true or db.cdSpells[tostring(saved)] == true) then
+				local aliases = SpellAliases(saved)
+				for index = 1, #secrets do
+					for aliasIndex = 1, #aliases do
+						if LockRemindersSameSpell(secrets[index], aliases[aliasIndex]) then
+							castID = saved
+							break
+						end
+					end
+					if castID then
+						break
+					end
+				end
+			end
+			if castID then
+				break
+			end
+		end
+	end
 	if not castID or not LockRemindersCDSpellSaved(castID) then
 		return
 	end
-	C_Timer.After(0.05, function()
-		LockRemindersCDPollSpell(castID)
-		LockRemindersCDLayout()
-	end)
-	C_Timer.After(0.25, function()
-		LockRemindersCDPollSpell(castID)
-		LockRemindersCDLayout()
-	end)
+	local function stamp()
+		pcall(LockRemindersCDStampCast, castID)
+		pcall(LockRemindersCDLayout)
+	end
+	stamp()
+	C_Timer.After(0.05, stamp)
+	C_Timer.After(0.25, stamp)
 end
 
 function LockRemindersUnitPercent(current, max)
@@ -9724,8 +11012,23 @@ function LockRemindersShowCurveVitals(healthOn, manaOn, healthPct, manaPct)
 	if not frame then
 		return false
 	end
-	local healthAlpha = healthOn and LockRemindersCurveAlpha("health", healthPct) or nil
-	local manaAlpha = manaOn and LockRemindersCurveAlpha("mana", manaPct) or nil
+	local function liveAlpha(alpha)
+		if alpha == nil then
+			return nil
+		end
+		-- Readable zero means "not low". Secret alphas are only used inside an
+		-- already-open one-shot window (caller gates that), never to discover a dip.
+		if LockRemindersSecret(alpha) then
+			return alpha
+		end
+		alpha = tonumber(alpha)
+		if not alpha or alpha <= 0.001 then
+			return nil
+		end
+		return alpha
+	end
+	local healthAlpha = healthOn and liveAlpha(LockRemindersCurveAlpha("health", healthPct)) or nil
+	local manaAlpha = manaOn and liveAlpha(LockRemindersCurveAlpha("mana", manaPct)) or nil
 	if healthAlpha == nil and manaAlpha == nil then
 		return false
 	end
@@ -9824,9 +11127,12 @@ function LockRemindersMiscTick()
 	elseif mp and mp > 1 then
 		LockRemindersMisc.manaLived = true
 	end
+	-- healthDown / manaDown = already warned for this dip (cleared only on recovery).
+	local healthSpent = LockRemindersMisc.healthDown and true or false
+	local manaSpent = LockRemindersMisc.manaDown and true or false
 	local healthFlag, manaFlag
 	if healthOn and hp == nil then
-		local line = LockRemindersMisc.healthDown and (healthPct + 3) or healthPct
+		local line = healthSpent and (healthPct + 3) or healthPct
 		local okFlag, flag = pcall(LockRemindersCurveFlag, "health", line)
 		if okFlag then
 			healthFlag = flag
@@ -9842,7 +11148,7 @@ function LockRemindersMiscTick()
 		end
 	end
 	if manaOn and mp == nil then
-		local line = LockRemindersMisc.manaDown and (manaPct + 3) or manaPct
+		local line = manaSpent and (manaPct + 3) or manaPct
 		local okFlag, flag = pcall(LockRemindersCurveFlag, "mana", line)
 		if okFlag then
 			manaFlag = flag
@@ -9857,28 +11163,28 @@ function LockRemindersMiscTick()
 			LockRemindersMisc.manaLived = true
 		end
 	end
-	if healthOn and not LockRemindersMisc.healthReady and (hp ~= nil or healthFlag ~= nil) then
-		LockRemindersMisc.healthReady = true
-		local safe = (hp ~= nil and hp > healthPct + 3) or healthFlag == false
-		local trustLow = LockRemindersMisc.healthLived == true
-		if safe then
-			hp = nil
-			healthFlag = nil
-		elseif not trustLow then
-			hp = nil
-			healthFlag = nil
+	if not quiet then
+		if healthOn and not LockRemindersMisc.healthReady and (hp ~= nil or healthFlag ~= nil) then
+			LockRemindersMisc.healthReady = true
+			local safe = (hp ~= nil and hp > healthPct + 3) or healthFlag == false
+			if safe then
+				hp = nil
+				healthFlag = nil
+			elseif healthFlag ~= true and LockRemindersMisc.healthLived ~= true then
+				hp = nil
+				healthFlag = nil
+			end
 		end
-	end
-	if manaOn and not LockRemindersMisc.manaReady and (mp ~= nil or manaFlag ~= nil) then
-		LockRemindersMisc.manaReady = true
-		local safe = (mp ~= nil and mp > manaPct + 3) or manaFlag == false
-		local trustLow = LockRemindersMisc.manaLived == true
-		if safe then
-			mp = nil
-			manaFlag = nil
-		elseif not trustLow then
-			mp = nil
-			manaFlag = nil
+		if manaOn and not LockRemindersMisc.manaReady and (mp ~= nil or manaFlag ~= nil) then
+			LockRemindersMisc.manaReady = true
+			local safe = (mp ~= nil and mp > manaPct + 3) or manaFlag == false
+			if safe then
+				mp = nil
+				manaFlag = nil
+			elseif manaFlag ~= true and LockRemindersMisc.manaLived ~= true then
+				mp = nil
+				manaFlag = nil
+			end
 		end
 	end
 	if quiet then
@@ -9887,66 +11193,110 @@ function LockRemindersMiscTick()
 	LockRemindersMisc.curveShown = false
 	local healthLow = false
 	local manaLow = false
-	local sound
+	local healthKnown = false
+	local manaKnown = false
+	local function curveSaysLow(kind, percent)
+		local ok, alpha = pcall(LockRemindersCurveAlpha, kind, percent)
+		if not ok or alpha == nil or LockRemindersSecret(alpha) then
+			return nil
+		end
+		alpha = tonumber(alpha)
+		if not alpha then
+			return nil
+		end
+		if alpha <= 0.001 then
+			return false
+		end
+		return true
+	end
 	if healthOn then
-		local fresh = false
 		if hp ~= nil then
-			if LockRemindersMisc.healthDown then
-				healthLow = hp <= healthPct + 3
-			else
-				healthLow = hp <= healthPct
-			end
-			fresh = healthLow
+			healthKnown = true
+			healthLow = hp <= (healthSpent and (healthPct + 3) or healthPct)
 		elseif healthFlag ~= nil then
-			healthLow = healthFlag
-			fresh = healthLow
-		elseif LockRemindersMisc.healthDown and LockRemindersMisc.healthHold and GetTime() < LockRemindersMisc.healthHold then
-			healthLow = true
-		end
-		if fresh then
-			LockRemindersMisc.healthHold = GetTime() + 1
-		end
-		if healthLow and not LockRemindersMisc.healthDown then
-			sound = db.healthSound or "zaps"
+			healthKnown = true
+			healthLow = healthFlag and true or false
+		else
+			local curveLow = curveSaysLow("health", healthPct)
+			if curveLow ~= nil then
+				healthKnown = true
+				healthLow = curveLow
+			end
 		end
 	end
-	local healthWas = LockRemindersMisc.healthDown
-	local manaWas = LockRemindersMisc.manaDown
 	if manaOn then
-		local fresh = false
 		if mp ~= nil then
-			if LockRemindersMisc.manaDown then
-				manaLow = mp <= manaPct + 3
-			else
-				manaLow = mp <= manaPct
-			end
-			fresh = manaLow
+			manaKnown = true
+			manaLow = mp <= (manaSpent and (manaPct + 3) or manaPct)
 		elseif manaFlag ~= nil then
-			manaLow = manaFlag
-			fresh = manaLow
-		elseif LockRemindersMisc.manaDown and LockRemindersMisc.manaHold and GetTime() < LockRemindersMisc.manaHold then
-			manaLow = true
+			manaKnown = true
+			manaLow = manaFlag and true or false
+		else
+			local curveLow = curveSaysLow("mana", manaPct)
+			if curveLow ~= nil then
+				manaKnown = true
+				manaLow = curveLow
+			end
 		end
-		if fresh then
-			LockRemindersMisc.manaHold = GetTime() + 1
-		end
-		if manaLow and not LockRemindersMisc.manaDown and not sound then
+	end
+	-- Recovery clears the spent latch so the next dip can alert once.
+	if healthOn and healthSpent and healthKnown and not healthLow then
+		healthSpent = false
+	end
+	if manaOn and manaSpent and manaKnown and not manaLow then
+		manaSpent = false
+	end
+	local now = GetTime()
+	local untilAt = LockRemindersMisc.vitalUntil
+	local inWindow = untilAt and now < untilAt
+	local sound
+	local healthEdge = healthOn and healthLow and not healthSpent
+	local manaEdge = manaOn and manaLow and not manaSpent
+	if healthEdge then
+		healthSpent = true
+		sound = db.healthSound or "zaps"
+	end
+	if manaEdge then
+		manaSpent = true
+		if not sound then
 			sound = db.manaSound or "chiji"
 		end
 	end
-	local now = GetTime()
-	if (healthLow and not healthWas) or (manaLow and not manaWas) then
+	if healthEdge or manaEdge then
 		LockRemindersMisc.vitalUntil = now + LockRemindersVitalHold()
+		untilAt = LockRemindersMisc.vitalUntil
+		inWindow = true
 	end
-	LockRemindersMisc.healthDown = healthLow
-	LockRemindersMisc.manaDown = manaLow
-	if not healthLow and not manaLow then
+	LockRemindersMisc.healthDown = healthSpent
+	LockRemindersMisc.manaDown = manaSpent
+	-- Nothing to show: recovered / idle.
+	if not inWindow then
 		LockRemindersMisc.vitalUntil = nil
 		LockRemindersSyncVital(false, false, nil, false)
 		return
 	end
-	LockRemindersMisc.vitalUntil = now + LockRemindersVitalHold()
-	LockRemindersSyncVital(healthLow, manaLow, sound, false)
+	-- Inside the one-shot window: prefer readable flags; curve only paints when still unknown.
+	local showHealth = healthOn and (healthLow or (not healthKnown and healthSpent))
+	local showMana = manaOn and (manaLow or (not manaKnown and manaSpent))
+	if not showHealth and not showMana then
+		LockRemindersSyncVital(false, false, nil, false)
+		return
+	end
+	local wantCurveHealth = showHealth and not healthKnown
+	local wantCurveMana = showMana and not manaKnown
+	if wantCurveHealth or wantCurveMana then
+		if LockRemindersShowCurveVitals(wantCurveHealth, wantCurveMana, healthPct, manaPct) then
+			if sound and sound ~= "none" then
+				LockRemindersPlaySoundId(sound, false)
+				sound = nil
+			end
+			if (showHealth and not wantCurveHealth) or (showMana and not wantCurveMana) then
+				LockRemindersSyncVital(showHealth, showMana, sound, false)
+			end
+			return
+		end
+	end
+	LockRemindersSyncVital(showHealth, showMana, sound, false)
 end
 
 function LockRemindersVitalHold()
@@ -9964,16 +11314,16 @@ function LockRemindersStartMisc()
 		return
 	end
 	if C_Timer.NewTicker then
-		LockRemindersMisc.ticker = C_Timer.NewTicker(0.1, function()
+		LockRemindersMisc.ticker = C_Timer.NewTicker(0.25, function()
 			pcall(LockRemindersMiscTick)
 		end)
 		return
 	end
 	local function again()
 		pcall(LockRemindersMiscTick)
-		C_Timer.After(0.1, again)
+		C_Timer.After(0.25, again)
 	end
-	C_Timer.After(0.1, again)
+	C_Timer.After(0.25, again)
 	LockRemindersMisc.ticker = true
 end
 
@@ -10422,12 +11772,12 @@ function LockRemindersSettingsButton(parent, anchor, text, gap, onClick)
 	return button
 end
 
-function LockRemindersSettingsEdit(parent, anchor, field, fallback, width, onApply, allowEmpty)
+function LockRemindersSettingsEdit(parent, anchor, field, fallback, width, onApply, allowEmpty, maxLetters)
 	local box = CreateFrame("EditBox", nil, parent, "BackdropTemplate")
 	box:SetSize(width or 140, 22)
 	box:SetPoint("LEFT", anchor, "RIGHT", 6, 0)
 	box:SetAutoFocus(false)
-	box:SetMaxLetters(24)
+	box:SetMaxLetters(tonumber(maxLetters) or 24)
 	box:SetFont("Fonts\\FRIZQT__.TTF", 12, "")
 	box:SetTextColor(1, 0.95, 0.86)
 	box:SetJustifyH("LEFT")
@@ -10979,11 +12329,9 @@ function CreateMiscAlerts()
 		if LockRemindersMisc.previewUntil and GetTime() < LockRemindersMisc.previewUntil then
 			return true
 		end
+		-- One-shot: only keep the frame while the vitalHold window is open.
 		local untilAt = LockRemindersMisc.vitalUntil
-		if untilAt and GetTime() >= untilAt then
-			return false
-		end
-		return LockRemindersMisc.healthDown or LockRemindersMisc.manaDown
+		return untilAt ~= nil and GetTime() < untilAt
 	end)
 	LockRemindersApplyVitalLook()
 	LockRemindersApplyNamedPoint(vital, "vitalPoint", { "CENTER", "CENTER", 0, 60 })
@@ -11290,8 +12638,10 @@ function LockRemindersNoteCast(unit, first, second, third)
 	if unit == "player" and target and LockRemindersBanishMatch(spellID, spellName) then
 		LockRemindersWarlock.ends = LockRemindersWarlock.ends or {}
 		LockRemindersWarlock.guess = LockRemindersWarlock.guess or {}
+		LockRemindersWarlock.applied = LockRemindersWarlock.applied or {}
 		LockRemindersWarlock.ends[target] = now + (spellID == 710 and 20 or 30)
 		LockRemindersWarlock.guess[target] = true
+		LockRemindersWarlock.applied[target] = now
 		if UnitName then
 			local ok, name = pcall(UnitName, aim)
 			if ok and type(name) == "string" and name ~= "" and not LockRemindersSecret(name) then
@@ -11305,8 +12655,10 @@ function LockRemindersNoteCast(unit, first, second, third)
 		local fearData = LockRemindersWarlock.fearData
 		fearData.ends = fearData.ends or {}
 		fearData.guess = fearData.guess or {}
+		fearData.applied = fearData.applied or {}
 		fearData.ends[target] = now + LockRemindersFearSeconds(spellID)
 		fearData.guess[target] = true
+		fearData.applied[target] = now
 		if UnitName then
 			local ok, name = pcall(UnitName, aim)
 			if ok and type(name) == "string" and name ~= "" and not LockRemindersSecret(name) then
@@ -11807,6 +13159,24 @@ function LockRemindersNoteAura(unit, info)
 	local guid = LockRemindersMissGuid(unit)
 	local now = GetTime()
 	local added = type(info) == "table" and not LockRemindersSecret(info) and info.addedAuras
+	local removed = type(info) == "table" and not LockRemindersSecret(info) and info.removedAuras
+	if type(removed) == "table" and not LockRemindersSecret(removed) then
+		for auraIndex = 1, #removed do
+			local aura = removed[auraIndex]
+			if type(aura) == "table" then
+				local id, name
+				pcall(function()
+					id = aura.spellId or aura.spellID
+					name = aura.name
+				end)
+				if LockRemindersFearMatch and LockRemindersFearMatch(id, name) then
+					LockRemindersClearCcGuid(guid, "fear")
+				elseif LockRemindersBanishMatch and LockRemindersBanishMatch(id, name) then
+					LockRemindersClearCcGuid(guid, "banish")
+				end
+			end
+		end
+	end
 	local casts = LockRemindersMiss.casts or {}
 	for index = #casts, 1, -1 do
 		local cast = casts[index]
@@ -12028,8 +13398,10 @@ function LockRemindersTakeMissCast(unit, eventSchool, woundMiss, schoolMagic)
 		local limit = 3.5
 		if cast.interrupt then
 			limit = 2
-		elseif cast.aura and not cast.travel then
-			limit = (LockRemindersCastIsDot(cast) and not woundMiss) and 2 or 0.8
+		elseif cast.travel then
+			limit = 3.5
+		elseif cast.aura then
+			limit = (LockRemindersCastIsDot(cast) and not woundMiss) and 2.5 or 1.2
 		end
 		local castSchool = cast.school or LockRemindersSpellSchool(cast.spellID, cast.name)
 		local schoolOk = false
@@ -12037,12 +13409,15 @@ function LockRemindersTakeMissCast(unit, eventSchool, woundMiss, schoolMagic)
 			schoolOk = not castSchool or LockRemindersSchoolOverlaps(eventSchool, castSchool)
 		elseif schoolMagic then
 			schoolOk = true
-		elseif not eventSchool and not cast.travel and age <= (LockRemindersCastIsDot(cast) and 0.8 or 0.45) then
+		elseif not eventSchool and not cast.travel and age <= (LockRemindersCastIsDot(cast) and 1.2 or 0.6) then
 			schoolOk = true
-		elseif not eventSchool and cast.travel and age >= 0.12 and age <= limit then
+		elseif not eventSchool and cast.travel and age >= 0.08 and age <= limit then
+			schoolOk = true
+		elseif not eventSchool and age <= limit then
 			schoolOk = true
 		end
-		if schoolOk and not cast.used and not cast.landed and aimed and age <= limit and LockRemindersMissSpellSaved(cast.spellID, cast.name) and LockRemindersMissUnit(unit, cast.kind) then
+		local saved = LockRemindersMissSpellSaved(cast.spellID or cast.secretID, cast.name)
+		if schoolOk and not cast.used and not cast.landed and aimed and age <= limit and saved and LockRemindersMissUnit(unit, cast.kind) then
 			if LockRemindersCastIsDot(cast) then
 				if LockRemindersUnitHasSpell(unit, cast.spellID, cast.name, cast.at, true) then
 					cast.landed = true
@@ -12076,8 +13451,13 @@ function LockRemindersTakeMissCast(unit, eventSchool, woundMiss, schoolMagic)
 	end
 end
 
-function LockRemindersNoteInterrupted(unit)
-	if type(unit) ~= "string" or unit == "" or unit == "player" or unit == "pet" or LockRemindersSecret(unit) then
+function LockRemindersNoteInterrupted(unit, first, second, third)
+	if type(unit) ~= "string" or unit == "" or LockRemindersSecret(unit) then
+		return
+	end
+	-- Player cast interrupt/fail: do not touch Fear/Banish timers. Forever can fire
+	-- FAILED/INTERRUPTED around a successful Fear and would wipe the alert.
+	if unit == "player" or unit == "pet" then
 		return
 	end
 	local watched = unit == "target" or unit == "pettarget"
@@ -12144,6 +13524,9 @@ function LockRemindersShowRecentMiss(unit, missType)
 			return false
 		end
 		local saved = missType == "IMMUNE" or LockRemindersMissSpellSaved(cast.spellID or cast.secretID, cast.name)
+		if not saved and cast.secretID then
+			saved = LockRemindersMissSpellSaved(cast.secretID, cast.name)
+		end
 		if not saved then
 			return false
 		end
@@ -12243,7 +13626,12 @@ function LockRemindersHandleUnitCombat(unit, action, flag, amount, school)
 	local immuneEvent = action == "IMMUNE" or flag == "IMMUNE"
 	if immuneEvent and school ~= 1 and (action ~= "WOUND" or amount == 0 or amount == nil) then
 		if db.immuneAlert ~= false then
-			LockRemindersShowRecentMiss(unit, "IMMUNE")
+			local cast = LockRemindersTakeMissCast(unit, school, false, school ~= 1)
+			if cast then
+				LockRemindersShowMissCast(cast, unit, "IMMUNE")
+			else
+				LockRemindersShowRecentMiss(unit, "IMMUNE")
+			end
 		end
 		return
 	end
@@ -12255,6 +13643,11 @@ function LockRemindersHandleUnitCombat(unit, action, flag, amount, school)
 			fullMiss = true
 		end
 		if not fullMiss then
+			-- Known damage only (no secret guesses). Grace after apply so DoT/swing spam
+			-- right as Fear lands does not wipe the timer before the alert can show.
+			if not ignored and type(amount) == "number" and amount > 0 then
+				pcall(LockRemindersNoteCcDamage, unit)
+			end
 			local connected = type(amount) == "number" and amount > 0 and school ~= 1 and not ignored and not amountSecret
 			if connected then
 				LockRemindersRecordMagicDamage(unit, amount)
@@ -12275,6 +13668,13 @@ function LockRemindersHandleUnitCombat(unit, action, flag, amount, school)
 	end
 	-- Physical swing misses are not spell alerts. Resists are always magical.
 	if missType == "MISS" and school == 1 then
+		return
+	end
+	LockRemindersMiss.missAt = GetTime()
+	LockRemindersMiss.missGuid = LockRemindersMissGuid(unit)
+	local cast = LockRemindersTakeMissCast(unit, school, woundMiss, school ~= 1 and school ~= nil)
+	if cast then
+		LockRemindersShowMissCast(cast, unit, missType)
 		return
 	end
 	LockRemindersShowRecentMiss(unit, missType)
@@ -12300,8 +13700,10 @@ function LockRemindersTakeImmuneCast(unit)
 		local limit = 3.5
 		if cast.interrupt then
 			limit = 2
+		elseif cast.travel then
+			limit = 3.5
 		elseif cast.aura then
-			limit = 0.8
+			limit = 1.2
 		end
 		if not cast.used and not cast.landed and aimed and age <= limit and LockRemindersMissUnit(unit, cast.kind) then
 			cast.used = true
@@ -12643,6 +14045,14 @@ function LockRemindersUnitKey(unit)
 end
 
 function LockRemindersUnitLabel(unit, full)
+	-- Forever: GetUnitName returns "First Last" as one string. UnitName / UnitNameUnmodified
+	-- return first and surname separately; the second value is NOT a realm.
+	if full and GetUnitName then
+		local ok, name = pcall(GetUnitName, unit, false)
+		if ok and type(name) == "string" and name ~= "" and not LockRemindersSecret(name) then
+			return name
+		end
+	end
 	if full and UnitNameUnmodified then
 		local ok, name, surname = pcall(UnitNameUnmodified, unit)
 		if ok and type(name) == "string" and name ~= "" and not LockRemindersSecret(name) then
@@ -12653,8 +14063,11 @@ function LockRemindersUnitLabel(unit, full)
 		end
 	end
 	if UnitName then
-		local ok, name = pcall(UnitName, unit)
+		local ok, name, surname = pcall(UnitName, unit)
 		if ok and type(name) == "string" and name ~= "" and not LockRemindersSecret(name) then
+			if full and type(surname) == "string" and surname ~= "" and not LockRemindersSecret(surname) and not tostring(surname):find("-", 1, true) then
+				return name .. " " .. surname
+			end
 			return name
 		end
 	end
@@ -12667,6 +14080,25 @@ function LockRemindersClassColor(class)
 		return color.r, color.g, color.b
 	end
 	return 0.9, 0.85, 1
+end
+
+function LockRemindersUnitClassFile(unit)
+	if not unit or not UnitClass then
+		return nil
+	end
+	local ok, _, classFile = pcall(UnitClass, unit)
+	if ok and type(classFile) == "string" and classFile ~= "" and not LockRemindersSecret(classFile) then
+		return classFile
+	end
+end
+
+function LockRemindersAnnounceNameText(unit)
+	-- Plain full name only. SendChatMessage auto-sends; |cff is rejected and the chat-box path needs Enter.
+	local name = LockRemindersUnitLabel(unit, true)
+	if type(name) ~= "string" or name == "" or LockRemindersSecret(name) then
+		return "Unknown"
+	end
+	return name
 end
 
 function LockRemindersCooldownLeft(spellID)
@@ -13186,6 +14618,265 @@ function LockRemindersReadBuff(unit, index)
 	}
 end
 
+function LockRemindersIsSoulApplySpell(spellID, spellName)
+	spellID = tonumber(spellID)
+	if spellID and LockRemindersSoulAura[spellID] then
+		return true
+	end
+	if type(spellName) ~= "string" or spellName == "" then
+		return false
+	end
+	local lowered = Normalize(spellName)
+	if lowered:find("create", 1, true) or lowered:find("crear", 1, true) then
+		return false
+	end
+	return LockRemindersIsSoulName(spellName)
+end
+
+function LockRemindersSoulCastAim()
+	local picks = { "mouseover", "target", "focus" }
+	for index = 1, #picks do
+		local unit = picks[index]
+		if UnitExists and UnitExists(unit) then
+			local okFriend, friend = UnitIsFriend and pcall(UnitIsFriend, "player", unit)
+			if okFriend and friend == true and not LockRemindersSecret(friend) then
+				return unit
+			end
+			local okAttack, attack = pcall(UnitCanAttack, "player", unit)
+			if not (okAttack and attack == true and not LockRemindersSecret(attack)) then
+				return unit
+			end
+		end
+	end
+end
+
+function LockRemindersAnnounceChannel(partyOn, raidOn)
+	if partyOn == nil then
+		partyOn = true
+	end
+	if raidOn == nil then
+		raidOn = true
+	end
+	local raidMembers = GetNumRaidMembers and GetNumRaidMembers() or 0
+	local inRaid = (IsInRaid and IsInRaid()) or (type(raidMembers) == "number" and raidMembers > 0)
+	if inRaid then
+		if raidOn then
+			return "RAID"
+		end
+		if partyOn then
+			return "PARTY"
+		end
+		return nil
+	end
+	local members = GetNumGroupMembers and GetNumGroupMembers() or 0
+	local partyMembers = GetNumPartyMembers and GetNumPartyMembers() or 0
+	local inParty = (IsInGroup and IsInGroup()) or (type(members) == "number" and members > 0) or (type(partyMembers) == "number" and partyMembers > 0)
+	if inParty and partyOn then
+		return "PARTY"
+	end
+end
+
+function LockRemindersFormatAnnounce(template, name)
+	if type(template) ~= "string" or template == "" then
+		return nil
+	end
+	local label = name
+	if type(label) ~= "string" or label == "" then
+		label = "Unknown"
+	end
+	if template:find("%%s") then
+		return (template:gsub("%%s", function()
+			return label
+		end, 1))
+	end
+	return template
+end
+
+function LockRemindersSendAnnounce(kind, message, channel)
+	if type(message) ~= "string" or message == "" or not channel or not SendChatMessage then
+		return
+	end
+	-- Keep the body free of |cff / |H: those make SendChatMessage drop the whole line.
+	message = message:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("|H.-|h(.-)|h", "%1"):gsub("|T.-|t", ""):gsub("||", "|")
+	if message == "" then
+		return
+	end
+	local now = GetTime()
+	local stamp = tostring(kind or "") .. "\0" .. channel .. "\0" .. message
+	if LockRemindersSoul.announceStamp == stamp and now - (LockRemindersSoul.announceAt or 0) < 3 then
+		return
+	end
+	LockRemindersSoul.announceStamp = stamp
+	LockRemindersSoul.announceAt = now
+	pcall(SendChatMessage, message, channel)
+end
+
+function LockRemindersAnnounceSoulstone(unit)
+	if not db or db.soulAnnounce == false then
+		return
+	end
+	local channel = LockRemindersAnnounceChannel(db.soulAnnounceParty ~= false, db.soulAnnounceRaid ~= false)
+	if not channel then
+		return
+	end
+	local targetName = LockRemindersAnnounceNameText(unit)
+	if type(targetName) ~= "string" or targetName == "" then
+		return
+	end
+	-- {rt3} is the purple diamond raid marker. %s is the full character name.
+	local template = db.soulAnnounceMsg
+	if type(template) ~= "string" or template == "" then
+		template = "{rt3} Soulstone on %s {rt3}"
+	end
+	local message = LockRemindersFormatAnnounce(template, targetName)
+	LockRemindersSendAnnounce("soul", message, channel)
+end
+
+function LockRemindersIsSummonSpell(spellID, spellName)
+	spellID = tonumber(spellID)
+	if spellID == 698 or spellID == 437169 then
+		return true
+	end
+	local key = Normalize(spellName or "")
+	return key == "ritual of summoning" or key == "portal of summoning"
+end
+
+function LockRemindersSummonAim()
+	local aim = LockRemindersSoulCastAim and LockRemindersSoulCastAim() or nil
+	if not aim then
+		aim = "target"
+	end
+	if not UnitExists or not UnitExists(aim) then
+		return nil
+	end
+	if UnitIsPlayer then
+		local ok, player = pcall(UnitIsPlayer, aim)
+		if not (ok and player == true and not LockRemindersSecret(player)) then
+			return nil
+		end
+	end
+	if UnitCanAttack then
+		local ok, attack = pcall(UnitCanAttack, "player", aim)
+		if ok and attack == true and not LockRemindersSecret(attack) then
+			return nil
+		end
+	end
+	return aim
+end
+
+function LockRemindersAnnounceSummon(unit)
+	if not db or db.summonAnnounce == false then
+		return
+	end
+	local channel = LockRemindersAnnounceChannel(db.summonAnnounceParty ~= false, db.summonAnnounceRaid ~= false)
+	if not channel then
+		return
+	end
+	local targetName
+	if unit then
+		targetName = LockRemindersAnnounceNameText(unit)
+	else
+		targetName = "now"
+	end
+	local template = db.summonAnnounceMsg
+	if type(template) ~= "string" or template == "" then
+		template = "{rt3} Summoning %s - click portal {rt3}"
+	end
+	local message = LockRemindersFormatAnnounce(template, targetName)
+	LockRemindersSendAnnounce("summon", message, channel)
+end
+
+function LockRemindersTrySummonAnnounce(spellID, spellName)
+	if not db or db.summonAnnounce == false or not LockRemindersIsWarlock() then
+		return
+	end
+	if not LockRemindersIsSummonSpell(spellID, spellName) then
+		return
+	end
+	LockRemindersAnnounceSummon(LockRemindersSummonAim())
+end
+
+function LockRemindersResolveSoulSpell(first, second, third)
+	local secrets = {}
+	local function keep(value)
+		if value == nil then
+			return nil
+		end
+		if LockRemindersSecret(value) then
+			secrets[#secrets + 1] = value
+			return nil
+		end
+		return value
+	end
+	first = keep(first)
+	second = keep(second)
+	third = keep(third)
+	local spellID = tonumber(third) or tonumber(second) or tonumber(first)
+	local spellName
+	if type(first) == "string" and first ~= "" and not first:find("-", 1, true) then
+		spellName = first
+	elseif type(second) == "string" and second ~= "" and not second:find("-", 1, true) then
+		spellName = second
+	elseif spellID then
+		spellName = SpellName(spellID)
+	end
+	if not spellID then
+		for index = 1, #secrets do
+			for auraID in pairs(LockRemindersSoulAura) do
+				if LockRemindersSameSpell(secrets[index], auraID) then
+					spellID = auraID
+					break
+				end
+			end
+			if spellID then
+				break
+			end
+		end
+	end
+	return spellID, spellName
+end
+
+function LockRemindersTrySoulAnnounce(spellID, spellName)
+	if not db or db.soulAnnounce == false or not LockRemindersIsWarlock() then
+		return
+	end
+	if not LockRemindersIsSoulApplySpell(spellID, spellName) then
+		return
+	end
+	local aim = LockRemindersSoulCastAim()
+	if not aim then
+		return
+	end
+	LockRemindersAnnounceSoulstone(aim)
+end
+
+function LockRemindersNoteSoulStart(unit, first, second, third)
+	if unit ~= "player" then
+		return
+	end
+	local spellID, spellName = LockRemindersResolveSoulSpell(first, second, third)
+	LockRemindersTrySoulAnnounce(spellID, spellName)
+	LockRemindersTrySummonAnnounce(spellID, spellName)
+end
+
+function LockRemindersPollSoulAnnounce()
+	if not LockRemindersIsWarlock() or not UnitCastingInfo then
+		return
+	end
+	local ok, name, _, _, _, _, _, _, _, spellID = pcall(UnitCastingInfo, "player")
+	if not ok or (name == nil and spellID == nil) then
+		return
+	end
+	local resolvedID, resolvedName = LockRemindersResolveSoulSpell(name, nil, spellID)
+	local plainName = resolvedName or (type(name) == "string" and name or nil)
+	if db and db.soulAnnounce ~= false then
+		LockRemindersTrySoulAnnounce(resolvedID, plainName)
+	end
+	if db and db.summonAnnounce ~= false then
+		LockRemindersTrySummonAnnounce(resolvedID or tonumber(spellID), plainName)
+	end
+end
+
 function LockRemindersNoteSoulCast(unit, first, second, third)
 	if not LockRemindersIsWarlock() or type(unit) ~= "string" or unit == "" then
 		return
@@ -13215,17 +14906,13 @@ function LockRemindersNoteSoulCast(unit, first, second, third)
 	end
 	local base = LockRemindersSoulBase()
 	LockRemindersRememberSoul(key, base, base)
-	local useSpell = spellID and LockRemindersSoulAura[spellID]
-	if not useSpell and type(spellName) == "string" then
-		local lowered = Normalize(spellName)
-		useSpell = LockRemindersIsSoulName(spellName) and not lowered:find("create", 1, true) and not lowered:find("crear", 1, true)
-	end
+	local useSpell = LockRemindersIsSoulApplySpell(spellID, spellName)
 	if useSpell then
 		LockRemindersSoul.usedUntil = GetTime() + 8
 	else
 		return
 	end
-	local aim = unit == "player" and "target" or (unit .. "target")
+	local aim = unit == "player" and (LockRemindersSoulCastAim() or "target") or (unit .. "target")
 	if not UnitExists or not UnitExists(aim) then
 		return
 	end
@@ -13233,6 +14920,7 @@ function LockRemindersNoteSoulCast(unit, first, second, third)
 	if not targetKey then
 		return
 	end
+	local targetName = LockRemindersUnitLabel(aim, db and db.soulFullName ~= false)
 	local casterClass
 	if UnitClass then
 		local ok, _, classFile = pcall(UnitClass, unit)
@@ -13242,7 +14930,7 @@ function LockRemindersNoteSoulCast(unit, first, second, third)
 	end
 	LockRemindersSoul.applied = LockRemindersSoul.applied or {}
 	LockRemindersSoul.applied[targetKey] = {
-		name = LockRemindersUnitLabel(unit, db and db.soulFullName ~= false),
+		name = targetName or LockRemindersUnitLabel(unit, db and db.soulFullName ~= false),
 		class = casterClass,
 		at = GetTime(),
 	}
@@ -13271,7 +14959,31 @@ function LockRemindersRegisterCastUnits()
 			units[#units + 1] = "party" .. index
 		end
 	end
+	pcall(frame.RegisterUnitEvent, frame, "UNIT_SPELLCAST_START", "player")
 	pcall(frame.RegisterUnitEvent, frame, "UNIT_SPELLCAST_SUCCEEDED", unpack(units))
+end
+
+function LockRemindersRegisterCombatUnits()
+	local frame = LockRemindersEvents
+	if not frame then
+		return
+	end
+	pcall(frame.RegisterEvent, frame, "UNIT_COMBAT")
+	if not frame.RegisterUnitEvent then
+		return
+	end
+	local units = { "target", "focus", "mouseover", "pettarget", "player", "pet" }
+	for index = 1, 40 do
+		units[#units + 1] = "nameplate" .. index
+	end
+	local batch = {}
+	for index = 1, #units do
+		batch[#batch + 1] = units[index]
+		if #batch >= 8 or index == #units then
+			pcall(frame.RegisterUnitEvent, frame, "UNIT_COMBAT", unpack(batch))
+			wipe(batch)
+		end
+	end
 end
 
 function LockRemindersSoulSnapshot()
@@ -14180,6 +15892,7 @@ function LockRemindersUpdateSoul()
 		end
 		return
 	end
+	pcall(LockRemindersPollSoulAnnounce)
 	LockRemindersUpdateClassAlerts()
 	LockRemindersUpdateSoulTracker()
 	local frame = LockRemindersSoul.alert
@@ -14224,9 +15937,45 @@ function LockRemindersStartSoul()
 	if LockRemindersSoul.ticker or not C_Timer or not LockRemindersIsWarlock() then
 		return
 	end
-	LockRemindersSoul.ticker = C_Timer.NewTicker(0.25, function()
+	LockRemindersSoul.ticker = C_Timer.NewTicker(0.4, function()
 		pcall(LockRemindersUpdateSoul)
 	end)
+end
+
+function LockRemindersLockAnnounceExtras(on, party, raid, msg, msgLabel)
+	local alpha = on and 1 or 0.35
+	local mouse = on and true or false
+	local function lockBox(box)
+		if not box then
+			return
+		end
+		box:EnableMouse(mouse)
+		if box.hit and box.hit.EnableMouse then
+			box.hit:EnableMouse(mouse)
+		end
+		box:SetAlpha(alpha)
+		if box.caption and box.caption.SetAlpha then
+			box.caption:SetAlpha(alpha)
+		end
+	end
+	lockBox(party)
+	lockBox(raid)
+	if msg then
+		if not on and msg.ClearFocus then
+			msg:ClearFocus()
+		end
+		if on and msg.Enable then
+			msg:Enable()
+		elseif not on and msg.Disable then
+			msg:Disable()
+		else
+			msg:EnableMouse(mouse)
+		end
+		msg:SetAlpha(alpha)
+	end
+	if msgLabel and msgLabel.SetAlpha then
+		msgLabel:SetAlpha(alpha)
+	end
 end
 
 function LockRemindersRefreshSoul()
@@ -14267,6 +16016,36 @@ function LockRemindersRefreshSoul()
 	if bar.trackFrame and bar.trackFrame.SetChecked then
 		bar.trackFrame:SetChecked(db.soulTrackFrame ~= false)
 	end
+	if bar.soulAnnounce and bar.soulAnnounce.SetChecked then
+		bar.soulAnnounce:SetChecked(db.soulAnnounce ~= false)
+	end
+	if bar.soulAnnounceParty and bar.soulAnnounceParty.SetChecked then
+		bar.soulAnnounceParty:SetChecked(db.soulAnnounceParty ~= false)
+	end
+	if bar.soulAnnounceRaid and bar.soulAnnounceRaid.SetChecked then
+		bar.soulAnnounceRaid:SetChecked(db.soulAnnounceRaid ~= false)
+	end
+	if bar.soulAnnounceMsg then
+		bar.soulAnnounceMsg.quiet = true
+		bar.soulAnnounceMsg:SetText(type(db.soulAnnounceMsg) == "string" and db.soulAnnounceMsg ~= "" and db.soulAnnounceMsg or "{rt3} Soulstone on %s {rt3}")
+		bar.soulAnnounceMsg.quiet = nil
+	end
+	LockRemindersLockAnnounceExtras(db.soulAnnounce ~= false, bar.soulAnnounceParty, bar.soulAnnounceRaid, bar.soulAnnounceMsg, bar.soulAnnounceMsgLabel)
+	if bar.summonAnnounce and bar.summonAnnounce.SetChecked then
+		bar.summonAnnounce:SetChecked(db.summonAnnounce ~= false)
+	end
+	if bar.summonAnnounceParty and bar.summonAnnounceParty.SetChecked then
+		bar.summonAnnounceParty:SetChecked(db.summonAnnounceParty ~= false)
+	end
+	if bar.summonAnnounceRaid and bar.summonAnnounceRaid.SetChecked then
+		bar.summonAnnounceRaid:SetChecked(db.summonAnnounceRaid ~= false)
+	end
+	if bar.summonAnnounceMsg then
+		bar.summonAnnounceMsg.quiet = true
+		bar.summonAnnounceMsg:SetText(type(db.summonAnnounceMsg) == "string" and db.summonAnnounceMsg ~= "" and db.summonAnnounceMsg or "{rt3} Summoning %s - click portal {rt3}")
+		bar.summonAnnounceMsg.quiet = nil
+	end
+	LockRemindersLockAnnounceExtras(db.summonAnnounce ~= false, bar.summonAnnounceParty, bar.summonAnnounceRaid, bar.summonAnnounceMsg, bar.summonAnnounceMsgLabel)
 	LockRemindersPaintToggle(bar.alertToggle, db.soulAlert ~= false)
 	LockRemindersPaintToggle(bar.trackToggle, db.soulTrack ~= false)
 	LockRemindersPaintToggle(bar.banishToggle, db.banishAlert ~= false)
@@ -14470,6 +16249,7 @@ function LockRemindersBuildSoul(owner)
 		hit:SetScript("OnClick", function()
 			box:Click()
 		end)
+		box.hit = hit
 		return box
 	end
 
@@ -14478,7 +16258,7 @@ function LockRemindersBuildSoul(owner)
 	end
 
 	LockRemindersSettingsHead(bar, "Soulstone")
-	local missing = LockRemindersSettingsCard(bar, 148, LockRemindersSoulIcon(), "Missing stone", "Empty or ready")
+	local missing = LockRemindersSettingsCard(bar, 214, LockRemindersSoulIcon(), "Missing stone", "Empty or ready")
 	bar.alertToggle = toggle(missing, "soulAlert", 176, -14)
 	bar.alertChecks = LockRemindersMakeScopeChecks(missing, bar.alertToggle, "soulScope")
 	local sizeLabel = LockRemindersSettingsCaption(missing, bar.alertChecks.always.caption, "Size", 12)
@@ -14541,6 +16321,25 @@ function LockRemindersBuildSoul(owner)
 	end, function(id)
 		db.soulSound = id
 	end)
+	bar.soulAnnounce = checkBox(missing, 176, -148, "Announce", "soulAnnounce")
+	bar.soulAnnounceParty = checkBox(missing, 280, -148, "Party", "soulAnnounceParty")
+	bar.soulAnnounceRaid = checkBox(missing, 360, -148, "Raid", "soulAnnounceRaid")
+	bar.soulAnnounceMsgLabel = missing:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	bar.soulAnnounceMsgLabel:SetPoint("TOPLEFT", 176, -176)
+	bar.soulAnnounceMsgLabel:SetText("Msg")
+	bar.soulAnnounceMsgLabel:SetTextColor(0.9, 0.84, 1)
+	bar.soulAnnounceMsg = LockRemindersSettingsEdit(missing, bar.soulAnnounceMsgLabel, "soulAnnounceMsg", "{rt3} Soulstone on %s {rt3}", 260, nil, false, 80)
+
+	LockRemindersSettingsHead(bar, "Summon")
+	local summon = LockRemindersSettingsCard(bar, 78, "Interface\\Icons\\Spell_Shadow_Twilight", "Ritual", "Announce")
+	bar.summonAnnounce = checkBox(summon, 176, -14, "Announce", "summonAnnounce")
+	bar.summonAnnounceParty = checkBox(summon, 280, -14, "Party", "summonAnnounceParty")
+	bar.summonAnnounceRaid = checkBox(summon, 360, -14, "Raid", "summonAnnounceRaid")
+	bar.summonAnnounceMsgLabel = summon:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	bar.summonAnnounceMsgLabel:SetPoint("TOPLEFT", 176, -42)
+	bar.summonAnnounceMsgLabel:SetText("Msg")
+	bar.summonAnnounceMsgLabel:SetTextColor(0.9, 0.84, 1)
+	bar.summonAnnounceMsg = LockRemindersSettingsEdit(summon, bar.summonAnnounceMsgLabel, "summonAnnounceMsg", "{rt3} Summoning %s - click portal {rt3}", 260, nil, false, 80)
 
 	LockRemindersSettingsHead(bar, "SS tracker")
 	local track = LockRemindersSettingsCard(bar, 82, LockRemindersSoulIcon(), "On screen", "Active stones")
@@ -14762,6 +16561,16 @@ function LockRemindersBuildSoul(owner)
 		bar.soulReadyLabel:SetText(LockRemindersClassLabel("soulReadyLabel", false))
 		bar.soulReadyLabel.quiet = nil
 	end
+	if bar.soulAnnounceMsg then
+		bar.soulAnnounceMsg.quiet = true
+		bar.soulAnnounceMsg:SetText(type(db.soulAnnounceMsg) == "string" and db.soulAnnounceMsg ~= "" and db.soulAnnounceMsg or "{rt3} Soulstone on %s {rt3}")
+		bar.soulAnnounceMsg.quiet = nil
+	end
+	if bar.summonAnnounceMsg then
+		bar.summonAnnounceMsg.quiet = true
+		bar.summonAnnounceMsg:SetText(type(db.summonAnnounceMsg) == "string" and db.summonAnnounceMsg ~= "" and db.summonAnnounceMsg or "{rt3} Summoning %s - click portal {rt3}")
+		bar.summonAnnounceMsg.quiet = nil
+	end
 	if bar.banishLabel then
 		bar.banishLabel.quiet = true
 		bar.banishLabel:SetText(LockRemindersClassLabel("banishLabel", false))
@@ -14820,6 +16629,144 @@ function LockRemindersFearSeconds(spellID)
 		return 15
 	end
 	return 20
+end
+
+function LockRemindersClearCcGuid(guid, kind)
+	if type(guid) ~= "string" or guid == "" then
+		return false
+	end
+	local cleared = false
+	if kind ~= "fear" then
+		if LockRemindersWarlock.ends and LockRemindersWarlock.ends[guid] then
+			LockRemindersWarlock.ends[guid] = nil
+			cleared = true
+		end
+		if LockRemindersWarlock.guess then
+			LockRemindersWarlock.guess[guid] = nil
+		end
+		if LockRemindersWarlock.applied then
+			LockRemindersWarlock.applied[guid] = nil
+		end
+	end
+	if kind ~= "banish" then
+		local fearData = LockRemindersWarlock.fearData
+		if fearData then
+			if fearData.ends and fearData.ends[guid] then
+				fearData.ends[guid] = nil
+				cleared = true
+			end
+			if fearData.guess then
+				fearData.guess[guid] = nil
+			end
+			if fearData.applied then
+				fearData.applied[guid] = nil
+			end
+		end
+	end
+	if cleared then
+		pcall(LockRemindersUpdateClassAlerts)
+	end
+	return cleared
+end
+
+function LockRemindersNoteCcDamage(unit)
+	if type(unit) ~= "string" or unit == "" then
+		return
+	end
+	local guid = LockRemindersMissGuid(unit)
+	if not guid then
+		return
+	end
+	local now = GetTime()
+	local fearData = LockRemindersWarlock.fearData
+	local fearAt = fearData and fearData.applied and fearData.applied[guid]
+	if fearAt and now - fearAt >= 1.25 then
+		LockRemindersClearCcGuid(guid, "fear")
+	end
+	local banishAt = LockRemindersWarlock.applied and LockRemindersWarlock.applied[guid]
+	if banishAt and now - banishAt >= 1.25 then
+		LockRemindersClearCcGuid(guid, "banish")
+	end
+end
+
+function LockRemindersClearCcByName(name, kind)
+	if type(name) ~= "string" or name == "" or LockRemindersSecret(name) then
+		return false
+	end
+	local wanted = Normalize(name)
+	local cleared = false
+	local function sweep(names)
+		if type(names) ~= "table" then
+			return
+		end
+		for guid, saved in pairs(names) do
+			if Normalize(saved or "") == wanted then
+				if LockRemindersClearCcGuid(guid, kind) then
+					cleared = true
+				end
+			end
+		end
+	end
+	if kind ~= "fear" then
+		sweep(LockRemindersWarlock.names)
+	end
+	if kind ~= "banish" then
+		local fearData = LockRemindersWarlock.fearData
+		sweep(fearData and fearData.names)
+	end
+	return cleared
+end
+
+function LockRemindersClearCcUnit(unit, kind)
+	if type(unit) ~= "string" or unit == "" then
+		return false
+	end
+	local cleared = false
+	local guid = LockRemindersMissGuid(unit)
+	if guid and LockRemindersClearCcGuid(guid, kind) then
+		cleared = true
+	end
+	if UnitName then
+		local ok, name = pcall(UnitName, unit)
+		if ok and LockRemindersClearCcByName(name, kind) then
+			cleared = true
+		end
+	end
+	return cleared
+end
+
+function LockRemindersReadCcLine(text)
+	if type(text) ~= "string" or text == "" or LockRemindersSecret(text) then
+		return
+	end
+	local name = text:match("^(.+) breaks free of your Fear!?$")
+		or text:match("^(.+) se libera de tu Miedo!?$")
+	if name then
+		LockRemindersClearCcByName(name, "fear")
+		return
+	end
+	name = text:match("^(.+) breaks free of your Banish!?$")
+		or text:match("^(.+) se libera de tu Destierro!?$")
+		or text:match("^(.+) se libera de tu Banish!?$")
+	if name then
+		LockRemindersClearCcByName(name, "banish")
+		return
+	end
+	name = text:match("^Fear fades from (.+)%.?$")
+		or text:match("^Miedo desaparece de (.+)%.?$")
+		or text:match("^Miedo se desvanece de (.+)%.?$")
+	if name then
+		LockRemindersClearCcByName(name, "fear")
+		return
+	end
+	name = text:match("^Banish fades from (.+)%.?$")
+		or text:match("^Destierro desaparece de (.+)%.?$")
+		or text:match("^Destierro se desvanece de (.+)%.?$")
+	if name then
+		LockRemindersClearCcByName(name, "banish")
+		return
+	end
+	-- Cast-interrupt chat lines are ignored here: they race a successful Fear land.
 end
 
 function LockRemindersReadCc(unit, match)
@@ -16937,6 +18884,24 @@ local function Command(message)
 
 	if command == "" or command == "show" or command == "config" then
 		TogglePanel()
+	elseif command == "proc" or command == "testproc" then
+		local key = spellID or LockRemindersEditedTalent()
+		if not key and db and type(db.talents) == "table" then
+			for saved in pairs(db.talents) do
+				key = saved
+				break
+			end
+		end
+		if not key then
+			Print("Add a proc first.")
+			return
+		end
+		pcall(CreateTalentAlert)
+		PlayTalent(key, true)
+		Print("Proc preview: " .. (SpellDisplayName(key) or SpellName(key) or tostring(key)))
+	elseif command == "dump" or command == "procdump" then
+		pcall(LockRemindersHookElvUIAuras)
+		pcall(LockRemindersDumpProcs)
 	elseif command == "help" then
 		Help()
 	elseif command == "lock" then
@@ -17100,6 +19065,14 @@ local function Command(message)
 		LockRemindersMisc.manaDown = false
 		LockRemindersMisc.previewUntil = nil
 		db.soulAlert = true
+		db.soulAnnounce = true
+		db.soulAnnounceParty = true
+		db.soulAnnounceRaid = true
+		db.soulAnnounceMsg = "{rt3} Soulstone on %s {rt3}"
+		db.summonAnnounce = true
+		db.summonAnnounceParty = true
+		db.summonAnnounceRaid = true
+		db.summonAnnounceMsg = "{rt3} Summoning %s - click portal {rt3}"
 		db.soulScope = { always = true, party = false, raid = false, instance = false }
 		db.soulSize = 48
 		db.soulLabel = "SOULSTONE"
@@ -17460,6 +19433,30 @@ local function InitDB()
 	if type(db.soulAlert) ~= "boolean" then
 		db.soulAlert = true
 	end
+	if type(db.soulAnnounce) ~= "boolean" then
+		db.soulAnnounce = true
+	end
+	if type(db.soulAnnounceParty) ~= "boolean" then
+		db.soulAnnounceParty = true
+	end
+	if type(db.soulAnnounceRaid) ~= "boolean" then
+		db.soulAnnounceRaid = true
+	end
+	if type(db.soulAnnounceMsg) ~= "string" or db.soulAnnounceMsg == "" then
+		db.soulAnnounceMsg = "{rt3} Soulstone on %s {rt3}"
+	end
+	if type(db.summonAnnounce) ~= "boolean" then
+		db.summonAnnounce = true
+	end
+	if type(db.summonAnnounceParty) ~= "boolean" then
+		db.summonAnnounceParty = true
+	end
+	if type(db.summonAnnounceRaid) ~= "boolean" then
+		db.summonAnnounceRaid = true
+	end
+	if type(db.summonAnnounceMsg) ~= "string" or db.summonAnnounceMsg == "" then
+		db.summonAnnounceMsg = "{rt3} Summoning %s - click portal {rt3}"
+	end
 	if type(db.soulScope) == "string" or type(db.soulScope) ~= "table" then
 		local always, party, raid, instance = ScopeFlags(db.soulScope)
 		db.soulScope = { always = always, party = party, raid = raid, instance = instance }
@@ -17639,7 +19636,13 @@ events:RegisterEvent("ITEM_DATA_LOAD_RESULT")
 pcall(events.RegisterEvent, events, "SPELLS_CHANGED")
 pcall(events.RegisterEvent, events, "UNIT_COMBAT")
 pcall(events.RegisterEvent, events, "UNIT_SPELLCAST_INTERRUPTED")
+pcall(events.RegisterEvent, events, "UNIT_SPELLCAST_FAILED")
 pcall(events.RegisterEvent, events, "SPELL_ACTIVATION_OVERLAY_SHOW")
+pcall(events.RegisterEvent, events, "SPELL_ACTIVATION_OVERLAY_GLOW_SHOW")
+pcall(events.RegisterEvent, events, "SPELL_ACTIVATION_OVERLAY_GLOW_HIDE")
+pcall(events.RegisterEvent, events, "SPELL_UPDATE_USABLE")
+pcall(events.RegisterEvent, events, "ACTIONBAR_UPDATE_USABLE")
+pcall(events.RegisterEvent, events, "UNIT_SPELLCAST_START")
 pcall(events.RegisterEvent, events, "UNIT_SPELLCAST_SUCCEEDED")
 pcall(events.RegisterEvent, events, "SPELL_UPDATE_COOLDOWN")
 pcall(events.RegisterEvent, events, "ACTIONBAR_UPDATE_COOLDOWN")
@@ -17656,7 +19659,11 @@ pcall(events.RegisterEvent, events, "CHAT_MSG_SPELL_PET_DAMAGE")
 	pcall(events.RegisterEvent, events, "CHAT_MSG_SPELL_SELF_MISSES")
 	pcall(events.RegisterEvent, events, "CHAT_MSG_COMBAT_PET_MISSES")
 	pcall(events.RegisterEvent, events, "CHAT_MSG_SPELL_PET_MISSES")
+	pcall(events.RegisterEvent, events, "CHAT_MSG_SPELL_PERIODIC_SELF_BUFFS")
+	pcall(events.RegisterEvent, events, "CHAT_MSG_SPELL_SELF_BUFF")
+	pcall(events.RegisterEvent, events, "CHAT_MSG_SPELL_AURA_GONE_SELF")
 if events.RegisterUnitEvent then
+	pcall(events.RegisterUnitEvent, events, "UNIT_SPELLCAST_START", "player")
 	pcall(events.RegisterUnitEvent, events, "UNIT_SPELLCAST_SUCCEEDED", "player", "pet")
 end
 
@@ -17681,20 +19688,40 @@ function LockRemindersSameSpell(left, right)
 end
 
 function LockRemindersMarkSecretAura(secretID)
-	if not secretID or not LockRemindersSecret(secretID) or not db or type(db.auras) ~= "table" then
+	if not secretID or not LockRemindersSecret(secretID) or not db then
 		return
 	end
 	LockRemindersCastSeen = LockRemindersCastSeen or {}
-	for key in pairs(db.auras) do
-		local saved = tonumber(key)
-		if saved then
-			local aliases = SpellAliases(saved)
-			for index = 1, #aliases do
-				if LockRemindersSameSpell(secretID, aliases[index]) then
-					LockRemindersStampBuff(saved)
-					LockRemindersBuffKnown = LockRemindersBuffKnown or {}
-					LockRemindersBuffKnown[saved] = true
-					return
+	local function stampSaved(saved)
+		LockRemindersStampBuff(saved)
+		LockRemindersBuffKnown = LockRemindersBuffKnown or {}
+		LockRemindersBuffKnown[saved] = true
+	end
+	if type(db.auras) == "table" then
+		for key in pairs(db.auras) do
+			local saved = tonumber(key)
+			if saved then
+				local aliases = SpellAliases(saved)
+				for index = 1, #aliases do
+					if LockRemindersSameSpell(secretID, aliases[index]) then
+						stampSaved(saved)
+						return
+					end
+				end
+			end
+		end
+	end
+	if type(db.talents) == "table" then
+		for key in pairs(db.talents) do
+			local saved = tonumber(key)
+			if saved then
+				local aliases = SpellAliases(saved)
+				for index = 1, #aliases do
+					if LockRemindersSameSpell(secretID, aliases[index]) then
+						stampSaved(saved)
+						pcall(TriggerTalent, saved)
+						return
+					end
 				end
 			end
 		end
@@ -17721,19 +19748,31 @@ function MarkCastBuff(spellID, spellName)
 		wanted = Normalize(SpellName(spellID) or "")
 	end
 	if wanted == "" or wanted:find("^spell ", 1, true) or wanted:find("^hechizo ", 1, true) then
+		if spellID then
+			pcall(TriggerTalent, spellID, spellName)
+		end
 		return
 	end
 	LockRemindersCastNames = LockRemindersCastNames or {}
 	LockRemindersCastNames[wanted] = GetTime()
-	if not db or type(db.auras) ~= "table" then
-		return
-	end
-	for key in pairs(db.auras) do
-		local saved = tonumber(key)
-		if saved and Normalize(SpellName(saved) or "") == wanted then
-			LockRemindersStampBuff(saved)
+	if db and type(db.auras) == "table" then
+		for key in pairs(db.auras) do
+			local saved = tonumber(key)
+			if saved and LockRemindersTalentNameMatch(Normalize(SpellName(saved) or ""), wanted) then
+				LockRemindersStampBuff(saved)
+			end
 		end
 	end
+	local talentKey = LockRemindersTalentKeyFromName and LockRemindersTalentKeyFromName(wanted)
+	if talentKey then
+		LockRemindersStampBuff(talentKey)
+		local aliases = LockRemindersTalentAliasNames(talentKey)
+		local stampAt = GetTime()
+		for index = 1, #aliases do
+			LockRemindersCastNames[aliases[index]] = stampAt
+		end
+	end
+	pcall(TriggerTalent, spellID or talentKey, spellName or wanted)
 end
 
 function LockRemindersStampBuff(spellID)
@@ -17810,7 +19849,7 @@ function WatchCombatAlerts()
 	if not events or events.combatTicker then
 		return
 	end
-	events.combatTicker = C_Timer.NewTicker(0.25, function()
+	events.combatTicker = C_Timer.NewTicker(0.5, function()
 		if not InCombatLockdown() then
 			if events.combatTicker then
 				events.combatTicker:Cancel()
@@ -17843,13 +19882,22 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
 		LockRemindersStartMisc()
 		pcall(CreateSoulAlerts)
 		LockRemindersStartSoul()
+		pcall(LockRemindersHookElvUIAuras)
+		pcall(LockRemindersStartTalentWatch)
 		LockRemindersRegisterCastUnits()
+		LockRemindersRegisterCombatUnits()
 		CreateMinimapButton()
 		Refresh()
 		C_Timer.After(1, function()
 			pcall(WatchTalents, true)
 			pcall(LockRemindersCDPollAll)
 			pcall(LockRemindersWatchMissChat)
+			pcall(LockRemindersRegisterCombatUnits)
+			pcall(LockRemindersHookElvUIAuras)
+			pcall(LockRemindersStartTalentWatch)
+		end)
+		C_Timer.After(3, function()
+			pcall(LockRemindersHookElvUIAuras)
 		end)
 		return
 	end
@@ -17861,17 +19909,48 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
 			UpdateListNow()
 		end
 	end
+	if event == "SPELL_ACTIVATION_OVERLAY_GLOW_SHOW" then
+		local ok, shown = pcall(LockRemindersNoteTalentGlow, arg1, true)
+		if (not ok or not shown) and arg2 then
+			ok, shown = pcall(LockRemindersNoteTalentGlow, arg2, true)
+		end
+		if not shown then
+			pcall(LockRemindersPollTalentOverlay)
+		end
+		return
+	end
+	if event == "SPELL_ACTIVATION_OVERLAY_GLOW_HIDE" then
+		pcall(LockRemindersNoteTalentGlow, arg1, false)
+		if arg2 then
+			pcall(LockRemindersNoteTalentGlow, arg2, false)
+		end
+		return
+	end
 	if event == "SPELL_ACTIVATION_OVERLAY_SHOW" then
-		pcall(TriggerTalent, arg1)
-		pcall(QuietScreenFlash)
+		local ok, shown = pcall(TriggerTalent, arg1, arg2)
+		if (not ok or not shown) and arg2 then
+			ok, shown = pcall(TriggerTalent, arg2, arg1)
+		end
+		if (not ok or not shown) and type(arg1) == "string" then
+			ok, shown = pcall(TriggerTalent, nil, arg1)
+		end
+		if not shown then
+			ok, shown = pcall(LockRemindersNoteTalentGlow, arg1, true)
+		end
+		if ok and shown then
+			pcall(QuietScreenFlash)
+		end
 		return
 	end
 	if event == "PLAYER_TARGET_CHANGED" then
 		pcall(LockRemindersUpdateSpeed)
 		pcall(LockRemindersFunOnTarget)
+		pcall(LockRemindersRegisterCombatUnits)
 	end
 	if type(event) == "string" and event:find("CHAT_MSG_", 1, true) == 1 then
 		pcall(LockRemindersReadMissLine, arg1)
+		pcall(LockRemindersReadCcLine, arg1)
+		pcall(LockRemindersReadTalentChat, arg1)
 		return
 	end
 	if event == "PLAYER_ENTERING_WORLD" then
@@ -17900,12 +19979,14 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
 			end
 		end
 		pcall(LockRemindersRegisterCastUnits)
+		pcall(LockRemindersRegisterCombatUnits)
 		pcall(LockRemindersCacheMissNames)
 		pcall(LockRemindersWatchMissChat)
 		PlaceMinimapButton()
 		C_Timer.After(0.6, function()
 			pcall(Refresh)
 			pcall(LockRemindersCDPollAll)
+			pcall(LockRemindersRegisterCombatUnits)
 		end)
 		C_Timer.After(2, function()
 			pcall(LockRemindersCacheMissNames)
@@ -17938,8 +20019,8 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
 		pcall(LockRemindersHandleUnitCombat, arg1, arg2, arg3, arg4, arg5)
 		return
 	end
-	if event == "UNIT_SPELLCAST_INTERRUPTED" then
-		pcall(LockRemindersNoteInterrupted, arg1)
+	if event == "UNIT_SPELLCAST_INTERRUPTED" or event == "UNIT_SPELLCAST_FAILED" then
+		pcall(LockRemindersNoteInterrupted, arg1, arg2, arg3, arg4)
 		return
 	end
 	if event == "GROUP_ROSTER_UPDATE" then
@@ -17952,6 +20033,10 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
 		if event ~= "BAG_UPDATE" then
 			return
 		end
+	end
+	if event == "UNIT_SPELLCAST_START" then
+		pcall(LockRemindersNoteSoulStart, arg1, arg2, arg3, arg4)
+		return
 	end
 	if event == "UNIT_SPELLCAST_SUCCEEDED" then
 		pcall(LockRemindersNoteSoulCast, arg1, arg2, arg3, arg4)
@@ -18012,8 +20097,39 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
 		if type(added) == "table" and not LockRemindersSecret(added) then
 			for index = 1, #added do
 				local aura = added[index]
-				if type(aura) == "table" and not (issecretvalue and issecretvalue(aura)) then
-					MarkCastBuff(aura.spellId or aura.spellID, aura.name)
+				if type(aura) == "table" then
+					-- Sealed Forever procs still arrive here as tables; match by sealed fields.
+					local okNote, noted = pcall(LockRemindersNoteTalentAura, aura)
+					if not (okNote and noted) then
+						local key = LockRemindersMatchTalentAura(aura)
+						if key then
+							LockRemindersStampBuff(key)
+							pcall(TriggerTalent, key)
+						end
+					end
+					local auraID, auraName
+					pcall(function()
+						auraID = aura.spellId or aura.spellID
+						auraName = aura.name
+					end)
+					if not LockRemindersSecret(aura) then
+						MarkCastBuff(auraID, auraName)
+						if not LockRemindersSecret(auraID) or not LockRemindersSecret(auraName) then
+							pcall(TriggerTalent, auraID, auraName)
+						end
+					end
+				end
+			end
+		end
+		local updated = arg2.updatedAuraInstanceIDs
+		if type(updated) == "table" and not LockRemindersSecret(updated) and C_UnitAuras and C_UnitAuras.GetAuraDataByAuraInstanceID then
+			for index = 1, #updated do
+				local instanceID = updated[index]
+				if instanceID ~= nil and not LockRemindersSecret(instanceID) then
+					local ok, aura = pcall(C_UnitAuras.GetAuraDataByAuraInstanceID, "player", instanceID)
+					if ok and aura then
+						pcall(LockRemindersNoteTalentAura, aura)
+					end
 				end
 			end
 		end
@@ -18024,6 +20140,11 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
 	end
 	if event == "UNIT_AURA" then
 		pcall(WatchTalents, false)
+		pcall(LockRemindersQueueTalentScan)
+	end
+	if event == "SPELL_UPDATE_USABLE" or event == "ACTIONBAR_UPDATE_USABLE" then
+		pcall(LockRemindersPollTalentOverlay)
+		pcall(LockRemindersQueueTalentScan)
 	end
 	pcall(Refresh)
 	if event == "UNIT_AURA" or event == "BAG_UPDATE_DELAYED" or event == "SPELL_DATA_LOAD_RESULT" or event == "ITEM_DATA_LOAD_RESULT" then
