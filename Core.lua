@@ -569,31 +569,57 @@ local function NormalizeScope(where)
 	if where == "party" then
 		return "party"
 	end
+	if where == "instance" or where == "dungeon" then
+		return "instance"
+	end
 	return "always"
+end
+
+function LockRemindersInContentInstance()
+	if not IsInInstance then
+		return false
+	end
+	local ok, inInstance, instanceType = pcall(IsInInstance)
+	if not ok then
+		return false
+	end
+	if LockRemindersSecret and (LockRemindersSecret(inInstance) or LockRemindersSecret(instanceType)) then
+		return false
+	end
+	if inInstance ~= true then
+		return false
+	end
+	return instanceType == "party" or instanceType == "raid"
 end
 
 local function ScopeFlags(where)
 	if type(where) == "table" then
-		return where.always and true or false, where.party and true or false, where.raid and true or false
+		return where.always and true or false, where.party and true or false, where.raid and true or false, where.instance and true or false
 	end
 	local mode = NormalizeScope(where)
 	if mode == "raid" then
-		return false, false, true
+		return false, false, true, false
 	end
 	if mode == "party" then
-		return false, true, false
+		return false, true, false, false
 	end
-	return true, false, false
+	if mode == "instance" then
+		return false, false, false, true
+	end
+	return true, false, false, false
 end
 
 local function ScopeLabel(where)
-	local always, party, raid = ScopeFlags(where)
+	local always, party, raid, instance = ScopeFlags(where)
 	local parts = {}
 	if raid then
 		parts[#parts + 1] = "Raid"
 	end
 	if party then
 		parts[#parts + 1] = "Party"
+	end
+	if instance then
+		parts[#parts + 1] = "Instance"
 	end
 	if always then
 		parts[#parts + 1] = "Always"
@@ -616,11 +642,14 @@ local function NextScope(where)
 	if where == "party" then
 		return "raid"
 	end
+	if where == "raid" then
+		return "instance"
+	end
 	return "always"
 end
 
 local function ScopeActive(where)
-	local always, party, raid = ScopeFlags(where)
+	local always, party, raid, instance = ScopeFlags(where)
 	if always then
 		return true
 	end
@@ -628,6 +657,9 @@ local function ScopeActive(where)
 		return true
 	end
 	if party and IsInGroup() and not IsInRaid() then
+		return true
+	end
+	if instance and LockRemindersInContentInstance() then
 		return true
 	end
 	return false
@@ -1828,8 +1860,8 @@ local function AddAura(spellID, where)
 		Print("Spell " .. spellID .. " does not exist.")
 		return
 	end
-	local always, party, raid = ScopeFlags(where)
-	db.auras[spellID] = { always = always, party = party, raid = raid }
+	local always, party, raid, instance = ScopeFlags(where)
+	db.auras[spellID] = { always = always, party = party, raid = raid, instance = instance }
 	if KnowsSpell(spellID) then
 		Print("Added: " .. info.name .. " (" .. ScopeLabel(where) .. ").")
 	else
@@ -1845,8 +1877,8 @@ local function AddFood(spellID)
 		return
 	end
 	db.food[spellID] = true
-	local always, party, raid = ScopeFlags(addScope)
-	LockRemindersWriteFoodScope(nil, spellID, { always = always, party = party, raid = raid, combat = false })
+	local always, party, raid, instance = ScopeFlags(addScope)
+	LockRemindersWriteFoodScope(nil, spellID, { always = always, party = party, raid = raid, instance = instance, combat = false })
 	Print("Food added: " .. info.name .. ".")
 	Touch()
 end
@@ -1925,8 +1957,8 @@ local function AddFoodItem(itemID)
 	end
 	local spellID = ItemUseSpell(itemID)
 	db.foodItems[itemID] = spellID or true
-	local always, party, raid = ScopeFlags(addScope)
-	LockRemindersWriteFoodScope(itemID, nil, { always = always, party = party, raid = raid, combat = false })
+	local always, party, raid, instance = ScopeFlags(addScope)
+	LockRemindersWriteFoodScope(itemID, nil, { always = always, party = party, raid = raid, instance = instance, combat = false })
 	if spellID then
 		Print("Consumable added: " .. name .. ".")
 	else
@@ -1988,9 +2020,9 @@ local function SetScopeFlag(spellID, flag, enabled)
 	if db.auras[key] == nil then
 		return
 	end
-	local always, party, raid = ScopeFlags(db.auras[key])
+	local always, party, raid, instance = ScopeFlags(db.auras[key])
 	local combat = type(db.auras[key]) == "table" and db.auras[key].combat and true or false
-	local scope = { always = always, party = party, raid = raid, combat = combat }
+	local scope = { always = always, party = party, raid = raid, instance = instance, combat = combat }
 	if flag == "combat" then
 		scope.combat = enabled and true or false
 	else
@@ -2759,8 +2791,8 @@ local function CollectPowers(query, typedID, spellLink)
 			sortName = "pet",
 		}
 		petRow.action = function()
-			local always, party, raid = ScopeFlags(addScope)
-			db.pet = { always = always, party = party, raid = raid, combat = false }
+			local always, party, raid, instance = ScopeFlags(addScope)
+			db.pet = { always = always, party = party, raid = raid, instance = instance, combat = false }
 			Print("Pet alert turned on.")
 			Touch()
 		end
@@ -2793,7 +2825,7 @@ local function CollectTalents(query)
 		local resolved
 		local okName, display = pcall(SpellDisplayName, spellID)
 		if okName then
-			resolved = display
+			resolved = Plain(display)
 		end
 		if not resolved or (resolved:find("^Hechizo ", 1, true) or resolved:find("^Spell ", 1, true)) then
 			resolved = nil
@@ -2827,6 +2859,8 @@ local function CollectTalents(query)
 			nightfall = { 17941, "Shadow Trance" },
 			anochecer = { 17941, "Shadow Trance" },
 			["caida de la noche"] = { 17941, "Shadow Trance" },
+			["shadow trance"] = { 17941, "Shadow Trance" },
+			["trance de las sombras"] = { 17941, "Shadow Trance" },
 			backlash = { 34936, "Backlash" },
 			contragolpe = { 34936, "Backlash" },
 		},
@@ -2885,20 +2919,113 @@ local function CollectTalents(query)
 	}
 	local catalog = byClass[classFile] or {}
 
-	if GetNumTalentTabs and GetNumTalents and GetTalentInfo then
+	local function takeLearned(name, icon)
+		name = Plain(name)
+		if not name then
+			return
+		end
+		local buff = catalog[talentKey(name)]
+		if buff then
+			offer(buff[1], buff[2], icon, "From " .. name, name)
+		end
+	end
+
+	-- Forever uses C_Traits. Classic GetTalentInfo is missing here.
+	pcall(function()
+		local configID
+		if C_SpecializationInfo and C_SpecializationInfo.GetActiveSpecGroup and C_SpecializationInfo.GetCombatConfigIDForSpecGroup then
+			local okGroup, group = pcall(C_SpecializationInfo.GetActiveSpecGroup)
+			group = okGroup and PlainNumber(group)
+			if group then
+				local okConfig, id = pcall(C_SpecializationInfo.GetCombatConfigIDForSpecGroup, group)
+				if okConfig then
+					configID = PlainNumber(id)
+				end
+			end
+		end
+		if not configID and C_ClassTalents and C_ClassTalents.GetActiveConfigID then
+			local okConfig, id = pcall(C_ClassTalents.GetActiveConfigID)
+			if okConfig then
+				configID = PlainNumber(id)
+			end
+		end
+		if not configID or not C_Traits or not C_Traits.GetConfigInfo or not C_Traits.GetTreeNodes or not C_Traits.GetNodeInfo then
+			return
+		end
+		local okInfo, configInfo = pcall(C_Traits.GetConfigInfo, configID)
+		local trees = okInfo and configInfo and configInfo.treeIDs
+		if type(trees) ~= "table" then
+			return
+		end
+		for treeIndex = 1, #trees do
+			local treeID = PlainNumber(trees[treeIndex]) or trees[treeIndex]
+			local okNodes, nodes = pcall(C_Traits.GetTreeNodes, treeID)
+			if okNodes and type(nodes) == "table" then
+				for nodeIndex = 1, #nodes do
+					local nodeID = PlainNumber(nodes[nodeIndex]) or nodes[nodeIndex]
+					local okNode, node = pcall(C_Traits.GetNodeInfo, configID, nodeID)
+					local rank = okNode and node and (PlainNumber(node.currentRank) or PlainNumber(node.ranksPurchased) or PlainNumber(node.activeRank)) or 0
+					if rank > 0 then
+						local entryID
+						if type(node.activeEntry) == "table" then
+							entryID = PlainNumber(node.activeEntry.entryID)
+						else
+							entryID = PlainNumber(node.activeEntry)
+						end
+						if not entryID and type(node.entryIDs) == "table" then
+							entryID = PlainNumber(node.entryIDs[1])
+						end
+						local talentName, talentIcon
+						if entryID and C_Traits.GetEntryInfo and C_Traits.GetDefinitionInfo then
+							local okEntry, entry = pcall(C_Traits.GetEntryInfo, configID, entryID)
+							local definitionID = okEntry and entry and PlainNumber(entry.definitionID)
+							if definitionID then
+								local okDef, definition = pcall(C_Traits.GetDefinitionInfo, definitionID)
+								if okDef and definition then
+									talentName = Plain(definition.overrideName)
+									talentIcon = PlainNumber(definition.overrideIcon)
+									if not talentName then
+										local spellID = PlainNumber(definition.spellID) or PlainNumber(definition.overriddenSpellID)
+										if spellID then
+											talentName = SpellName(spellID)
+											talentIcon = talentIcon or SpellIcon(spellID)
+										end
+									end
+								end
+							end
+						end
+						takeLearned(talentName, talentIcon)
+					end
+				end
+			end
+		end
+	end)
+
+	pcall(function()
+		if not (GetNumTalentTabs and GetNumTalents and GetTalentInfo) then
+			return
+		end
 		local okTabs, tabCount = pcall(GetNumTalentTabs)
-		tabCount = okTabs and tonumber(tabCount) or 0
+		tabCount = okTabs and PlainNumber(tabCount) or 0
 		for tab = 1, tabCount do
 			local okCount, count = pcall(GetNumTalents, tab)
-			count = okCount and tonumber(count) or 0
+			count = okCount and PlainNumber(count) or 0
 			for index = 1, count do
 				local okInfo, name, icon, _, _, rank = pcall(GetTalentInfo, tab, index)
 				name = okInfo and Plain(name)
-				rank = tonumber(rank) or 0
-				local buff = name and catalog[talentKey(name)]
-				if buff and rank > 0 then
-					offer(buff[1], buff[2], icon, "From " .. name, name)
+				rank = PlainNumber(rank) or 0
+				if name and rank > 0 then
+					takeLearned(name, icon)
 				end
+			end
+		end
+	end)
+
+	-- Search by talent or buff name even when the tree API did not surface it.
+	if query ~= "" then
+		for key, buff in pairs(catalog) do
+			if key:find(query, 1, true) or NameMatches(buff[2], query) then
+				offer(buff[1], buff[2], SpellIcon(buff[1]), "Talent buff", key)
 			end
 		end
 	end
@@ -2946,8 +3073,8 @@ local function HealthstoneSection(query)
 			db.healthstone = nil
 			Print("Healthstone alert turned off.")
 		else
-			local always, party, raid = ScopeFlags(addScope)
-			db.healthstone = { always = always, party = party, raid = raid, combat = false }
+			local always, party, raid, instance = ScopeFlags(addScope)
+			db.healthstone = { always = always, party = party, raid = raid, instance = instance, combat = false }
 			Print("Healthstone alert turned on.")
 		end
 		Touch()
@@ -3207,8 +3334,15 @@ function LockRemindersAddMissSpell(spellID)
 		return
 	end
 	db.missSpells[spellID] = true
+	if type(db.missNames) ~= "table" then
+		db.missNames = {}
+	end
+	local name = SpellName(spellID)
+	if type(name) == "string" and name ~= "" then
+		db.missNames[tostring(spellID)] = name
+	end
 	LockRemindersCacheMissNames()
-	Print((SpellName(spellID) or "Spell") .. " will alert when it misses or resists.")
+	Print((name or SpellName(spellID) or "Spell") .. " will alert when it misses or resists.")
 	Touch()
 end
 
@@ -3996,12 +4130,14 @@ local function AcquireRow()
 				settings = LockRemindersFoodScope(row.entry.itemID, row.entry.spellID)
 			end
 			if type(settings) == "table" then
-				local always, party, raid = ScopeFlags(settings)
+				local always, party, raid, instance = ScopeFlags(settings)
 				local current = always
 				if flag == "raid" then
 					current = raid
 				elseif flag == "party" then
 					current = party
+				elseif flag == "instance" then
+					current = instance
 				elseif flag == "combat" then
 					current = settings.combat
 				end
@@ -4009,6 +4145,7 @@ local function AcquireRow()
 					always = always,
 					party = party,
 					raid = raid,
+					instance = instance,
 					combat = settings.combat and true or false,
 				}
 				if flag == "combat" then
@@ -4037,12 +4174,14 @@ local function AcquireRow()
 			if not row.spellID or AuraScope(row.spellID) == nil then
 				return
 			end
-			local always, party, raid = ScopeFlags(AuraScope(row.spellID))
+			local always, party, raid, instance = ScopeFlags(AuraScope(row.spellID))
 			local current = always
 			if flag == "raid" then
 				current = raid
 			elseif flag == "party" then
 				current = party
+			elseif flag == "instance" then
+				current = instance
 			elseif flag == "combat" then
 				current = type(AuraScope(row.spellID)) == "table" and AuraScope(row.spellID).combat
 			end
@@ -4068,6 +4207,7 @@ local function AcquireRow()
 	end
 	local nextX = AddScopeBox("raid", "Raid", 0, 52)
 	nextX = AddScopeBox("party", "Party", nextX, 58)
+	nextX = AddScopeBox("instance", "Instance", nextX, 78)
 	nextX = AddScopeBox("always", "Always", nextX, 64)
 	nextX = AddScopeBox("combat", "Combat", nextX, 78)
 	row.scopes:SetWidth(nextX)
@@ -4133,18 +4273,24 @@ local function FillRow(row, entry)
 		local full = entry.scopes and true or false
 		row.scopes.raid:SetShown(full)
 		row.scopes.party:SetShown(full)
+		if row.scopes.instance then
+			row.scopes.instance:SetShown(full)
+		end
 		row.scopes.always:SetShown(full)
 		row.scopes.combat:SetShown(true)
 		row.scopes.combat:ClearAllPoints()
 		if full then
 			local where = (entry.pet and db.pet) or (entry.stone and db.healthstone) or (entry.foodScope and LockRemindersFoodScope(entry.itemID, entry.spellID)) or AuraScope(entry.spellID)
-			local always, party, raid = ScopeFlags(where)
+			local always, party, raid, instance = ScopeFlags(where)
 			row.scopes.raid:SetChecked(raid)
 			row.scopes.party:SetChecked(party)
+			if row.scopes.instance then
+				row.scopes.instance:SetChecked(instance)
+			end
 			row.scopes.always:SetChecked(always)
 			row.scopes.combat:SetChecked(type(where) == "table" and where.combat)
-			row.scopes.combat:SetPoint("LEFT", row.scopes, "LEFT", 174, 0)
-			row.scopes:SetWidth(252)
+			row.scopes.combat:SetPoint("LEFT", row.scopes, "LEFT", 252, 0)
+			row.scopes:SetWidth(330)
 		else
 			row.scopes.combat:SetChecked(FoodInCombat(entry.itemID, entry.spellID))
 			row.scopes.combat:SetPoint("LEFT", row.scopes, "LEFT", 0, 0)
@@ -4686,6 +4832,7 @@ function LockRemindersFoodScope(itemID, spellID)
 			always = scope.always and true or false,
 			party = scope.party and true or false,
 			raid = scope.raid and true or false,
+			instance = scope.instance and true or false,
 			combat = scope.combat and true or false,
 		}
 	end
@@ -4693,6 +4840,7 @@ function LockRemindersFoodScope(itemID, spellID)
 		always = false,
 		party = false,
 		raid = true,
+		instance = false,
 		combat = FoodInCombat(itemID, spellID),
 	}
 end
@@ -4709,6 +4857,7 @@ function LockRemindersWriteFoodScope(itemID, spellID, scope)
 		always = scope.always and true or false,
 		party = scope.party and true or false,
 		raid = scope.raid and true or false,
+		instance = scope.instance and true or false,
 		combat = scope.combat and true or false,
 	}
 	SetFoodCombat(itemID, spellID, scope.combat)
@@ -6432,8 +6581,49 @@ function LockRemindersHideTalentOrnament()
 	end
 	frame.pulse = false
 	frame.fading = nil
+	frame:EnableMouse(false)
+	if frame.hint then
+		frame.hint:Hide()
+	end
 	frame:SetAlpha(1)
 	frame:Hide()
+end
+
+function LockRemindersSaveTalentArtPoint()
+	local frame = LockRemindersTalentOrnament
+	if not frame or not db then
+		return
+	end
+	local cx, cy = frame:GetCenter()
+	local ux, uy = UIParent:GetCenter()
+	if not cx or not cy or not ux or not uy then
+		return
+	end
+	local x = math.floor(cx - ux + 0.5)
+	local y = math.floor(cy - uy + 0.5)
+	if x < -400 then
+		x = -400
+	end
+	if x > 400 then
+		x = 400
+	end
+	if y < -400 then
+		y = -400
+	end
+	if y > 400 then
+		y = 400
+	end
+	local key = LockRemindersEditedTalent() or (talentFrame and talentFrame.spellID)
+	local entry = key and LockRemindersEnsureTalent(key)
+	if entry then
+		entry.x = x
+		entry.y = y
+	else
+		db.talentArtX = x
+		db.talentArtY = y
+	end
+	frame:ClearAllPoints()
+	frame:SetPoint("CENTER", UIParent, "CENTER", x, y)
 end
 
 function LockRemindersShowTalentOrnament(style, spellID)
@@ -6447,12 +6637,36 @@ function LockRemindersShowTalentOrnament(style, spellID)
 		frame:SetSize(640, 480)
 		frame:SetFrameStrata("DIALOG")
 		frame:SetFrameLevel(40)
+		frame:SetClampedToScreen(true)
+		frame:SetMovable(true)
+		frame:EnableMouse(false)
+		frame:RegisterForDrag("LeftButton")
+		frame:SetScript("OnDragStart", function(self)
+			if talentMoving then
+				self.pulse = false
+				self:SetAlpha(1)
+				self:StartMoving()
+			end
+		end)
+		frame:SetScript("OnDragStop", function(self)
+			self:StopMovingOrSizing()
+			LockRemindersSaveTalentArtPoint()
+			if talentMoving then
+				self.pulse = true
+				self.age = 0
+			end
+		end)
 		frame.left = frame:CreateTexture(nil, "ARTWORK")
 		frame.right = frame:CreateTexture(nil, "ARTWORK")
 		frame.top = frame:CreateTexture(nil, "ARTWORK")
 		frame.left:SetBlendMode("ADD")
 		frame.right:SetBlendMode("ADD")
 		frame.top:SetBlendMode("ADD")
+		frame.hint = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		frame.hint:SetPoint("TOP", frame, "BOTTOM", 0, -6)
+		frame.hint:SetText("Drag")
+		frame.hint:SetTextColor(1, 0.86, 0.45)
+		frame.hint:Hide()
 		frame:SetScript("OnUpdate", function(self, elapsed)
 			elapsed = elapsed or 0
 			if self.fading then
@@ -6482,6 +6696,10 @@ function LockRemindersShowTalentOrnament(style, spellID)
 	local artX, artY = LockRemindersTalentArtOffset(spellID)
 	frame:ClearAllPoints()
 	frame:SetPoint("CENTER", UIParent, "CENTER", artX, artY)
+	frame:EnableMouse(talentMoving and true or false)
+	if frame.hint then
+		frame.hint:SetShown(talentMoving and true or false)
+	end
 	if frame.left then
 		frame.left:Hide()
 	end
@@ -6658,15 +6876,35 @@ function ShowTalentPreview(show)
 		talentFrame.fade:Stop()
 	end
 	talentFrame:SetAlpha(1)
-	if talentMoving and LockRemindersTalentOnScreen() then
+	local key = LockRemindersEditedTalent()
+	local style = LockRemindersTalentStyle(key)
+	talentFrame.spellID = key
+	if talentMoving then
 		ApplyTalentLook()
 		ApplyTalentPoint()
-		ApplyTalentFace()
-		talentFrame:Show()
+		ApplyTalentFace(key)
+		if style == "icon" then
+			talentFrame:Show()
+		else
+			talentFrame:Hide()
+			local ornament = LockRemindersTalentOrnament
+			if ornament then
+				ornament:EnableMouse(true)
+				if ornament.hint then
+					ornament.hint:Show()
+				end
+			end
+		end
 		Print("Drag the animation. Press Done when you finish.")
 	else
-		talentMoving = false
 		ApplyTalentLook()
+		local ornament = LockRemindersTalentOrnament
+		if ornament then
+			ornament:EnableMouse(false)
+			if ornament.hint then
+				ornament.hint:Hide()
+			end
+		end
 		LockRemindersHideTalentOrnament()
 		talentFrame:Hide()
 	end
@@ -7374,7 +7612,10 @@ function LockRemindersSaveSpellMissPoint()
 end
 
 function ShowSpellMiss(spellID, spellName, icon, kind, missType, destName)
-	if not LockRemindersMiss.frame or LockRemindersMiss.moving or Blocked() then
+	if not LockRemindersMiss.frame or LockRemindersMiss.moving then
+		return
+	end
+	if UnitIsDeadOrGhost and UnitIsDeadOrGhost("player") then
 		return
 	end
 	if type(spellName) ~= "string" or spellName == "" or (issecretvalue and issecretvalue(spellName)) then
@@ -7845,9 +8086,32 @@ function LockRemindersCDEnsureState(kind, id, name, icon)
 	return state, key
 end
 
+function LockRemindersCDRememberedLeft(state)
+	if not state or not state.start or not state.duration then
+		return nil
+	end
+	if LockRemindersSecret(state.start) or LockRemindersSecret(state.duration) then
+		return nil
+	end
+	local left = state.start + state.duration - GetTime()
+	if left > 0 then
+		return left
+	end
+end
+
 function LockRemindersCDMarkCooling(state, left, duration, start)
 	if not state then
 		return
+	end
+	-- GCD or channel blips must not replace a long cooldown we already trust.
+	if state.mode == "cooling" then
+		local remembered = LockRemindersCDRememberedLeft(state)
+		if remembered and remembered > 0.5 and state.duration and state.duration >= 5 then
+			if not duration or duration < 5 or (left and left + 0.75 < remembered and duration + 1 < state.duration) then
+				state.left = remembered
+				return
+			end
+		end
 	end
 	local was = state.mode
 	state.mode = "cooling"
@@ -7856,6 +8120,7 @@ function LockRemindersCDMarkCooling(state, left, duration, start)
 	state.start = start
 	state.readyUntil = nil
 	state.fading = nil
+	state.misses = 0
 	if was ~= "cooling" then
 		state.pulse = true
 	end
@@ -7871,11 +8136,43 @@ function LockRemindersCDMarkReady(state)
 	state.duration = nil
 	state.start = nil
 	state.fading = nil
+	state.misses = 0
 	state.readyUntil = GetTime() + LockRemindersCDHold()
 	if was == "cooling" then
 		state.flash = true
 		LockRemindersPlaySoundId(db and db.cdSound or "chiji")
 	end
+end
+
+function LockRemindersCDPollCooldown(state, left, duration, start)
+	if not state then
+		return
+	end
+	if left and left > 0 then
+		LockRemindersCDMarkCooling(state, left, duration, start)
+		return
+	end
+	if state.mode == "cooling" then
+		local remembered = LockRemindersCDRememberedLeft(state)
+		if remembered and remembered > 0.35 then
+			state.left = remembered
+			state.misses = 0
+			return
+		end
+		state.misses = (state.misses or 0) + 1
+		if state.misses < 3 then
+			return
+		end
+		LockRemindersCDMarkReady(state)
+		return
+	end
+	if state.mode == "out" then
+		return
+	end
+	if state.mode == "ready" and state.readyUntil and GetTime() < state.readyUntil then
+		return
+	end
+	LockRemindersCD.states[state.key] = nil
 end
 
 function LockRemindersCDPollSpell(spellID)
@@ -7885,17 +8182,7 @@ function LockRemindersCDPollSpell(spellID)
 	end
 	local state = LockRemindersCDEnsureState("spell", spellID, SpellName(spellID), SpellIcon(spellID))
 	local left, duration, start = LockRemindersCDReadSpell(spellID)
-	if left and left > 0 then
-		LockRemindersCDMarkCooling(state, left, duration, start)
-	elseif state.mode == "cooling" then
-		LockRemindersCDMarkReady(state)
-	elseif state.mode == "out" then
-		return
-	elseif state.mode == "ready" and state.readyUntil and GetTime() < state.readyUntil then
-		return
-	else
-		LockRemindersCD.states[state.key] = nil
-	end
+	LockRemindersCDPollCooldown(state, left, duration, start)
 end
 
 function LockRemindersCDPollItem(itemID)
@@ -7905,17 +8192,7 @@ function LockRemindersCDPollItem(itemID)
 	end
 	local state = LockRemindersCDEnsureState("item", itemID, ItemName(itemID), ItemIcon(itemID))
 	local left, duration, start = LockRemindersCDReadItem(itemID)
-	if left and left > 0 then
-		LockRemindersCDMarkCooling(state, left, duration, start)
-	elseif state.mode == "cooling" then
-		LockRemindersCDMarkReady(state)
-	elseif state.mode == "out" then
-		return
-	elseif state.mode == "ready" and state.readyUntil and GetTime() < state.readyUntil then
-		return
-	else
-		LockRemindersCD.states[state.key] = nil
-	end
+	LockRemindersCDPollCooldown(state, left, duration, start)
 end
 
 function LockRemindersCDPollAll()
@@ -8630,23 +8907,38 @@ function LockRemindersScaledPercent(kind)
 	if not CurveConstants or not CurveConstants.ScaleTo100 then
 		return nil
 	end
-	local ok, value
+	local function take(ok, value)
+		if not ok or value == nil or LockRemindersSecret(value) then
+			return nil
+		end
+		value = tonumber(value)
+		if not value then
+			return nil
+		end
+		if value > 0 and value <= 1 then
+			value = value * 100
+		end
+		return math.floor(value + 0.5)
+	end
 	if kind == "health" and UnitHealthPercent then
+		local ok, value = pcall(UnitHealthPercent, "player", true, CurveConstants.ScaleTo100)
+		local percent = take(ok, value)
+		if percent ~= nil then
+			return percent
+		end
 		ok, value = pcall(UnitHealthPercent, "player", false, CurveConstants.ScaleTo100)
-	elseif kind == "mana" and UnitPowerPercent then
-		ok, value = pcall(UnitPowerPercent, "player", LockRemindersPlayerPower(), false, CurveConstants.ScaleTo100)
+		return take(ok, value)
 	end
-	if not ok or value == nil or LockRemindersSecret(value) then
-		return nil
+	if kind == "mana" and UnitPowerPercent then
+		local power = LockRemindersPlayerPower()
+		local ok, value = pcall(UnitPowerPercent, "player", power, true, CurveConstants.ScaleTo100)
+		local percent = take(ok, value)
+		if percent ~= nil then
+			return percent
+		end
+		ok, value = pcall(UnitPowerPercent, "player", power, false, CurveConstants.ScaleTo100)
+		return take(ok, value)
 	end
-	value = tonumber(value)
-	if not value then
-		return nil
-	end
-	if value > 0 and value <= 1 then
-		value = value * 100
-	end
-	return math.floor(value + 0.5)
 end
 
 function LockRemindersHealthPercent()
@@ -9196,17 +9488,26 @@ function LockRemindersCurveAlpha(kind, percent)
 	if not curve then
 		return nil
 	end
-	local ok, alpha
+	local function take(ok, alpha)
+		if ok and alpha ~= nil then
+			return alpha
+		end
+	end
 	if kind == "health" and UnitHealthPercent then
-		ok, alpha = pcall(UnitHealthPercent, "player", false, curve)
-	elseif kind == "mana" and UnitPowerPercent then
+		local alpha = take(pcall(UnitHealthPercent, "player", true, curve))
+		if alpha ~= nil then
+			return alpha
+		end
+		return take(pcall(UnitHealthPercent, "player", false, curve))
+	end
+	if kind == "mana" and UnitPowerPercent then
 		local power = LockRemindersPlayerPower()
-		ok, alpha = pcall(UnitPowerPercent, "player", power, false, curve)
+		local alpha = take(pcall(UnitPowerPercent, "player", power, true, curve))
+		if alpha ~= nil then
+			return alpha
+		end
+		return take(pcall(UnitPowerPercent, "player", power, false, curve))
 	end
-	if not ok or alpha == nil then
-		return nil
-	end
-	return alpha
 end
 
 function LockRemindersSecretLow(kind, percent)
@@ -9255,11 +9556,14 @@ function LockRemindersSecretLow(kind, percent)
 	end
 	if kind == "health" then
 		if UnitHealthPercent and CurveConstants and CurveConstants.ScaleTo100 then
-			local ok, value = pcall(UnitHealthPercent, "player", false, CurveConstants.ScaleTo100)
-			if ok then
-				local low = below(value)
-				if low ~= nil then
-					return low
+			local tries = { true, false }
+			for index = 1, #tries do
+				local ok, value = pcall(UnitHealthPercent, "player", tries[index], CurveConstants.ScaleTo100)
+				if ok then
+					local low = below(value)
+					if low ~= nil then
+						return low
+					end
 				end
 			end
 		end
@@ -9285,11 +9589,14 @@ function LockRemindersSecretLow(kind, percent)
 	end
 	local power = LockRemindersPlayerPower()
 	if UnitPowerPercent and CurveConstants and CurveConstants.ScaleTo100 then
-		local ok, value = pcall(UnitPowerPercent, "player", power, false, CurveConstants.ScaleTo100)
-		if ok then
-			local low = below(value)
-			if low ~= nil then
-				return low
+		local tries = { true, false }
+		for index = 1, #tries do
+			local ok, value = pcall(UnitPowerPercent, "player", power, tries[index], CurveConstants.ScaleTo100)
+			if ok then
+				local low = below(value)
+				if low ~= nil then
+					return low
+				end
 			end
 		end
 	end
@@ -9485,9 +9792,7 @@ function LockRemindersMiscTick()
 	if LockRemindersMisc.previewUntil and GetTime() < LockRemindersMisc.previewUntil then
 		return
 	end
-	if LockRemindersZoneQuiet() then
-		return
-	end
+	local quiet = LockRemindersZoneQuiet()
 	local healthOn = db.healthAlert ~= false
 	local manaOn = db.manaAlert ~= false
 	local healthPct = tonumber(db.healthPct) or 35
@@ -9501,22 +9806,26 @@ function LockRemindersMiscTick()
 	if okMana and type(manaValue) == "number" then
 		mp = manaValue
 	end
-	if hp and hp > 0 then
+	if hp and hp >= math.max(healthPct + 5, 40) then
 		LockRemindersMisc.healthLived = true
 	elseif hp == 0 or (hp and hp < 1) then
 		if not LockRemindersMisc.healthLived then
 			hp = nil
 		end
+	elseif hp and hp > 1 then
+		LockRemindersMisc.healthLived = true
 	end
-	if mp and mp > 0 then
+	if mp and mp >= math.max(manaPct + 5, 40) then
 		LockRemindersMisc.manaLived = true
 	elseif mp == 0 or (mp and mp < 1) then
 		if not LockRemindersMisc.manaLived then
 			mp = nil
 		end
+	elseif mp and mp > 1 then
+		LockRemindersMisc.manaLived = true
 	end
 	local healthFlag, manaFlag
-	if healthOn and hp == nil and LockRemindersMisc.healthLived then
+	if healthOn and hp == nil then
 		local line = LockRemindersMisc.healthDown and (healthPct + 3) or healthPct
 		local okFlag, flag = pcall(LockRemindersCurveFlag, "health", line)
 		if okFlag then
@@ -9528,8 +9837,11 @@ function LockRemindersMiscTick()
 				healthFlag = low
 			end
 		end
+		if healthFlag == false then
+			LockRemindersMisc.healthLived = true
+		end
 	end
-	if manaOn and mp == nil and LockRemindersMisc.manaLived then
+	if manaOn and mp == nil then
 		local line = LockRemindersMisc.manaDown and (manaPct + 3) or manaPct
 		local okFlag, flag = pcall(LockRemindersCurveFlag, "mana", line)
 		if okFlag then
@@ -9541,16 +9853,36 @@ function LockRemindersMiscTick()
 				manaFlag = low
 			end
 		end
+		if manaFlag == false then
+			LockRemindersMisc.manaLived = true
+		end
 	end
 	if healthOn and not LockRemindersMisc.healthReady and (hp ~= nil or healthFlag ~= nil) then
 		LockRemindersMisc.healthReady = true
-		hp = nil
-		healthFlag = nil
+		local safe = (hp ~= nil and hp > healthPct + 3) or healthFlag == false
+		local trustLow = LockRemindersMisc.healthLived == true
+		if safe then
+			hp = nil
+			healthFlag = nil
+		elseif not trustLow then
+			hp = nil
+			healthFlag = nil
+		end
 	end
 	if manaOn and not LockRemindersMisc.manaReady and (mp ~= nil or manaFlag ~= nil) then
 		LockRemindersMisc.manaReady = true
-		mp = nil
-		manaFlag = nil
+		local safe = (mp ~= nil and mp > manaPct + 3) or manaFlag == false
+		local trustLow = LockRemindersMisc.manaLived == true
+		if safe then
+			mp = nil
+			manaFlag = nil
+		elseif not trustLow then
+			mp = nil
+			manaFlag = nil
+		end
+	end
+	if quiet then
+		return
 	end
 	LockRemindersMisc.curveShown = false
 	local healthLow = false
@@ -9882,8 +10214,8 @@ end
 
 function LockRemindersOpenSettings(owner, key)
 	local bar = CreateFrame("Frame", nil, owner)
-	bar:SetPoint("TOPLEFT", 14, -116)
-	bar:SetPoint("BOTTOMRIGHT", -16, 36)
+	bar:SetPoint("TOPLEFT", 14, -112)
+	bar:SetPoint("BOTTOMRIGHT", -16, 28)
 	bar:Hide()
 	owner[key] = bar
 	local scroll = CreateFrame("ScrollFrame", nil, bar)
@@ -9894,9 +10226,46 @@ function LockRemindersOpenSettings(owner, key)
 	bar.scroll = scroll
 	bar.body = body
 	bar.cursor = -4
+	local slider = CreateFrame("Slider", nil, bar, "BackdropTemplate")
+	slider:SetWidth(8)
+	slider:SetPoint("TOPRIGHT", 2, -2)
+	slider:SetPoint("BOTTOMRIGHT", 2, 2)
+	slider:SetOrientation("VERTICAL")
+	slider:SetMinMaxValues(0, 1)
+	slider:SetValue(0)
+	Paint(slider, 0.1, 0.08, 0.14, 0.9, 0.28, 0.22, 0.38, 1)
+	local thumb = slider:CreateTexture(nil, "OVERLAY")
+	thumb:SetTexture("Interface\\Buttons\\WHITE8x8")
+	thumb:SetSize(8, 36)
+	thumb:SetVertexColor(0.62, 0.5, 0.86, 0.95)
+	slider:SetThumbTexture(thumb)
+	slider:Hide()
+	bar.slider = slider
+	local syncing = false
+	local function syncSlider()
+		local range = scroll:GetVerticalScrollRange() or 0
+		if range <= 1 then
+			slider:SetMinMaxValues(0, 1)
+			slider:SetValue(0)
+			slider:Hide()
+			return
+		end
+		slider:Show()
+		slider:SetMinMaxValues(0, range)
+		syncing = true
+		slider:SetValue(scroll:GetVerticalScroll() or 0)
+		syncing = false
+	end
+	bar.syncSlider = syncSlider
+	slider:SetScript("OnValueChanged", function(_, value)
+		if syncing then
+			return
+		end
+		scroll:SetVerticalScroll(value or 0)
+	end)
 	local function wheel(_, delta)
 		local range = scroll:GetVerticalScrollRange() or 0
-		local value = scroll:GetVerticalScroll() - delta * 36
+		local value = scroll:GetVerticalScroll() - delta * 40
 		if value < 0 then
 			value = 0
 		end
@@ -9904,19 +10273,41 @@ function LockRemindersOpenSettings(owner, key)
 			value = range
 		end
 		scroll:SetVerticalScroll(value)
+		syncSlider()
 	end
 	bar.wheel = wheel
 	bar:EnableMouseWheel(true)
 	bar:SetScript("OnMouseWheel", wheel)
 	body:EnableMouseWheel(true)
 	body:SetScript("OnMouseWheel", wheel)
+	slider:EnableMouseWheel(true)
+	slider:SetScript("OnMouseWheel", wheel)
 	bar:SetScript("OnShow", function(self)
 		local width = self:GetWidth()
 		if width and width > 40 then
 			self.body:SetWidth(width)
 		end
+		if self.syncSlider then
+			self.syncSlider()
+		end
 	end)
 	return bar
+end
+
+function LockRemindersPinSettingsActions(move, test, parent, yOffset)
+	yOffset = yOffset or -14
+	if test then
+		test:ClearAllPoints()
+		test:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -8, yOffset)
+	end
+	if move then
+		move:ClearAllPoints()
+		if test then
+			move:SetPoint("RIGHT", test, "LEFT", -8, 0)
+		else
+			move:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -8, yOffset)
+		end
+	end
 end
 
 function LockRemindersSettingsHead(bar, text)
@@ -9961,7 +10352,10 @@ function LockRemindersSettingsCard(bar, height, icon, title, note)
 end
 
 function LockRemindersSettingsFinish(bar)
-	bar.body:SetHeight(math.max(40, -bar.cursor + 12))
+	bar.body:SetHeight(math.max(40, -bar.cursor + 28))
+	if bar.syncSlider then
+		C_Timer.After(0, bar.syncSlider)
+	end
 end
 
 function LockRemindersSettingsCaption(parent, anchor, text, gap)
@@ -11737,21 +12131,37 @@ function LockRemindersShowRecentMiss(unit, missType)
 	local now = GetTime()
 	local guid = unit and LockRemindersMissGuid(unit) or nil
 	local casts = LockRemindersMiss.casts or {}
-	for index = #casts, 1, -1 do
-		local cast = casts[index]
+	local function tryCast(cast, aimedOnly)
+		if not cast or cast.used or cast.landed then
+			return false
+		end
 		local age = now - (cast.at or 0)
 		if age > 4 then
-			return
+			return false
 		end
 		local aimed = cast.aoe or not guid or not cast.target or cast.target == guid
+		if aimedOnly and not aimed then
+			return false
+		end
 		local saved = missType == "IMMUNE" or LockRemindersMissSpellSaved(cast.spellID or cast.secretID, cast.name)
-		if not cast.used and aimed and saved then
-			cast.used = true
-			local held = LockRemindersMiss.held
-			if held and held.cast == cast then
-				held.cancel = true
-			end
-			LockRemindersShowMissCast(cast, unit, missType)
+		if not saved then
+			return false
+		end
+		cast.used = true
+		local held = LockRemindersMiss.held
+		if held and held.cast == cast then
+			held.cancel = true
+		end
+		LockRemindersShowMissCast(cast, unit, missType)
+		return true
+	end
+	for index = #casts, 1, -1 do
+		if tryCast(casts[index], true) then
+			return
+		end
+	end
+	for index = #casts, 1, -1 do
+		if tryCast(casts[index], false) then
 			return
 		end
 	end
@@ -11860,7 +12270,11 @@ function LockRemindersHandleUnitCombat(unit, action, flag, amount, school)
 	elseif action == "RESIST" or action == "RESISTED" then
 		missType = "RESIST"
 	end
-	if not missType or school == 1 then
+	if not missType then
+		return
+	end
+	-- Physical swing misses are not spell alerts. Resists are always magical.
+	if missType == "MISS" and school == 1 then
 		return
 	end
 	LockRemindersShowRecentMiss(unit, missType)
@@ -12177,6 +12591,12 @@ function LockRemindersWatchMissChat()
 	if not LockRemindersMissChatMixin and ChatFrameMixin and ChatFrameMixin.AddMessage then
 		LockRemindersMissChatMixin = true
 		hooksecurefunc(ChatFrameMixin, "AddMessage", function(_, message)
+			pcall(LockRemindersReadMissLine, message)
+		end)
+	end
+	if not LockRemindersMissCombatText and type(CombatText_AddMessage) == "function" then
+		LockRemindersMissCombatText = true
+		hooksecurefunc("CombatText_AddMessage", function(message)
 			pcall(LockRemindersReadMissLine, message)
 		end)
 	end
@@ -13933,6 +14353,7 @@ function LockRemindersMakeScopeChecks(parent, anchor, field)
 	local specs = {
 		{ "raid", "Raid" },
 		{ "party", "Party" },
+		{ "instance", "Instance" },
 		{ "always", "Always" },
 	}
 	local boxes = {}
@@ -13964,8 +14385,8 @@ function LockRemindersMakeScopeChecks(parent, anchor, field)
 		box.caption:SetText(caption)
 		box.caption:SetTextColor(0.92, 0.88, 1)
 		box:SetScript("OnClick", function()
-			local always, party, raid = ScopeFlags(db[field])
-			local scope = { always = always, party = party, raid = raid }
+			local always, party, raid, instance = ScopeFlags(db[field])
+			local scope = { always = always, party = party, raid = raid, instance = instance }
 			scope[flag] = not scope[flag]
 			db[field] = scope
 			LockRemindersUpdateSoul()
@@ -13983,9 +14404,12 @@ function LockRemindersMakeScopeChecks(parent, anchor, field)
 		pad = 8
 	end
 	function boxes.refresh()
-		local always, party, raid = ScopeFlags(db and db[field])
+		local always, party, raid, instance = ScopeFlags(db and db[field])
 		boxes.raid:SetChecked(raid)
 		boxes.party:SetChecked(party)
+		if boxes.instance then
+			boxes.instance:SetChecked(instance)
+		end
 		boxes.always:SetChecked(always)
 	end
 	return boxes
@@ -14072,6 +14496,7 @@ function LockRemindersBuildSoul(owner)
 	bar.testButton = LockRemindersSettingsButton(missing, bar.moveButton, "Test", 8, function()
 		LockRemindersPreviewSoul()
 	end)
+	LockRemindersPinSettingsActions(bar.moveButton, bar.testButton, missing, -14)
 	local soulTextLabel = missing:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	soulTextLabel:SetPoint("TOPLEFT", 176, -50)
 	soulTextLabel:SetText("Empty")
@@ -14142,6 +14567,7 @@ function LockRemindersBuildSoul(owner)
 		LockRemindersUpdateSoul()
 		LockRemindersRefreshSoul()
 	end)
+	LockRemindersPinSettingsActions(bar.trackMove, bar.trackTest, track, -14)
 	bar.fullName = checkBox(track, 176, -50, "Full name", "soulFullName")
 	bar.trackFrame = checkBox(track, 280, -50, "Frame", "soulTrackFrame", LockRemindersApplySoulTrackLook)
 	local trackTextLabel = LockRemindersSettingsCaption(track, bar.trackFrame.caption, "Text", 16)
@@ -14213,6 +14639,7 @@ function LockRemindersBuildSoul(owner)
 		LockRemindersUpdateClassAlerts()
 		LockRemindersRefreshSoul()
 	end)
+	LockRemindersPinSettingsActions(bar.banishMove, bar.banishTest, banish, -50)
 
 	LockRemindersSettingsHead(bar, "Fear")
 	local fear = LockRemindersSettingsCard(bar, 90, "Interface\\Icons\\Spell_Shadow_Possession", "Fear", "Countdown")
@@ -14263,6 +14690,7 @@ function LockRemindersBuildSoul(owner)
 		LockRemindersUpdateClassAlerts()
 		LockRemindersRefreshSoul()
 	end)
+	LockRemindersPinSettingsActions(bar.fearMove, bar.fearTest, fear, -50)
 
 	LockRemindersSettingsHead(bar, "Soul shards")
 	local shards = LockRemindersSettingsCard(bar, 114, "Interface\\Icons\\INV_Misc_Gem_Amethyst_02", "Soul shards", "In your bags")
@@ -14301,6 +14729,7 @@ function LockRemindersBuildSoul(owner)
 		LockRemindersUpdateClassAlerts()
 		LockRemindersRefreshSoul()
 	end)
+	LockRemindersPinSettingsActions(bar.shardMove, bar.shardTest, shards, -50)
 	local glowLabel = LockRemindersSettingsCaption(shards, shards, "Glow", 0)
 	glowLabel:ClearAllPoints()
 	glowLabel:SetPoint("TOPLEFT", 176, -78)
@@ -15488,7 +15917,7 @@ end
 
 local function CreatePanel()
 	panel = CreateFrame("Frame", "LockRemindersPanel", UIParent, "BackdropTemplate")
-	panel:SetSize(740, 600)
+	panel:SetSize(760, 800)
 	panel:SetFrameStrata("HIGH")
 	panel:SetToplevel(true)
 	panel:SetClampedToScreen(true)
@@ -16134,8 +16563,8 @@ local function CreatePanel()
 			entry.style = id
 		end
 		db.talentStyle = id
-		if talentMoving and id ~= "icon" then
-			ShowTalentPreview(false)
+		if talentMoving then
+			ShowTalentPreview(true)
 		end
 		PlayTalent(key, true)
 		Touch()
@@ -16162,51 +16591,9 @@ local function CreatePanel()
 
 	talentBar.flashCheck = CreateFrame("Button", nil, talentBar, "BackdropTemplate")
 	talentBar.flashCheck:SetSize(22, 22)
-	local placeLabel = talentBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	placeLabel:SetPoint("TOPLEFT", 4, -172)
-	placeLabel:SetText("Place")
-	placeLabel:SetTextColor(0.9, 0.84, 1)
-	local placeXMinus = StepButton(talentBar, "-")
-	placeXMinus:SetPoint("LEFT", placeLabel, "RIGHT", 10, 0)
-	placeXMinus:SetScript("OnClick", function()
-		ChangeTalentPlace("x", -16)
-	end)
-	talentBar.placeX = talentBar:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-	talentBar.placeX:SetPoint("LEFT", placeXMinus, "RIGHT", 6, 0)
-	talentBar.placeX:SetWidth(36)
-	talentBar.placeX:SetJustifyH("CENTER")
-	local placeXPlus = StepButton(talentBar, "+")
-	placeXPlus:SetPoint("LEFT", talentBar.placeX, "RIGHT", 2, 0)
-	placeXPlus:SetScript("OnClick", function()
-		ChangeTalentPlace("x", 16)
-	end)
-	local placeYLabel = talentBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	placeYLabel:SetPoint("LEFT", placeXPlus, "RIGHT", 16, 0)
-	placeYLabel:SetText("Y")
-	placeYLabel:SetTextColor(0.9, 0.84, 1)
-	local placeYMinus = StepButton(talentBar, "-")
-	placeYMinus:SetPoint("LEFT", placeYLabel, "RIGHT", 8, 0)
-	placeYMinus:SetScript("OnClick", function()
-		ChangeTalentPlace("y", -16)
-	end)
-	talentBar.placeY = talentBar:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-	talentBar.placeY:SetPoint("LEFT", placeYMinus, "RIGHT", 6, 0)
-	talentBar.placeY:SetWidth(36)
-	talentBar.placeY:SetJustifyH("CENTER")
-	local placeYPlus = StepButton(talentBar, "+")
-	placeYPlus:SetPoint("LEFT", talentBar.placeY, "RIGHT", 2, 0)
-	placeYPlus:SetScript("OnClick", function()
-		ChangeTalentPlace("y", 16)
-	end)
-	local placeXLabel = talentBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	placeXLabel:SetPoint("LEFT", placeLabel, "RIGHT", 10, 0)
-	placeXLabel:SetText("X")
-	placeXLabel:SetTextColor(0.9, 0.84, 1)
-	placeXMinus:ClearAllPoints()
-	placeXMinus:SetPoint("LEFT", placeXLabel, "RIGHT", 8, 0)
 
 	local fadeLabel = talentBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	fadeLabel:SetPoint("TOPLEFT", 4, -206)
+	fadeLabel:SetPoint("TOPLEFT", 4, -172)
 	fadeLabel:SetText("Fade")
 	fadeLabel:SetTextColor(0.9, 0.84, 1)
 	local fadeMinus = StepButton(talentBar, "-")
@@ -16255,7 +16642,7 @@ local function CreatePanel()
 		writeLookColor("accent", red, green, blue)
 	end, previewLook)
 
-	talentBar.flashCheck:SetPoint("TOPLEFT", 4, -240)
+	talentBar.flashCheck:SetPoint("TOPLEFT", 4, -206)
 	Paint(talentBar.flashCheck, 0.14, 0.1, 0.2, 1, 0.58, 0.45, 0.82, 1)
 	talentBar.flashCheck.mark = talentBar.flashCheck:CreateTexture(nil, "OVERLAY")
 	talentBar.flashCheck.mark:SetPoint("CENTER")
@@ -16303,11 +16690,6 @@ local function CreatePanel()
 		if talentBar.fadeText then
 			talentBar.fadeText:SetText(string.format("%.1f", LockRemindersTalentFade()))
 		end
-		if talentBar.placeX and talentBar.placeY then
-			local artX, artY = LockRemindersTalentArtOffset()
-			talentBar.placeX:SetText(tostring(artX))
-			talentBar.placeY:SetText(tostring(artY))
-		end
 		if talentBar.colorSwatch and talentBar.colorSwatch.refresh then
 			talentBar.colorSwatch.refresh()
 		end
@@ -16319,7 +16701,7 @@ local function CreatePanel()
 		talentHoldText:SetShown(not untilEnd)
 		holdPlus:SetShown(not untilEnd)
 		if talentMoveButton then
-			talentMoveButton:SetShown(LockRemindersTalentOnScreen())
+			talentMoveButton:Show()
 		end
 		local on = db.talentScreenFlash ~= false
 		talentBar.flashCheck.mark:SetShown(on)
@@ -16390,6 +16772,9 @@ local function CreatePanel()
 		end
 		if searchBox then
 			searchBox:ClearFocus()
+		end
+		if talentMoving then
+			ShowTalentPreview(false)
 		end
 	end)
 
@@ -16715,14 +17100,14 @@ local function Command(message)
 		LockRemindersMisc.manaDown = false
 		LockRemindersMisc.previewUntil = nil
 		db.soulAlert = true
-		db.soulScope = { always = true, party = false, raid = false }
+		db.soulScope = { always = true, party = false, raid = false, instance = false }
 		db.soulSize = 48
 		db.soulLabel = "SOULSTONE"
 		db.soulReadyLabel = "READY"
 		db.soulPoint = { "CENTER", "CENTER", 0, 180 }
 		db.soulSound = "chiji"
 		db.soulTrack = true
-		db.soulTrackScope = { always = true, party = false, raid = false }
+		db.soulTrackScope = { always = true, party = false, raid = false, instance = false }
 		db.soulTrackSize = 100
 		db.soulTrackFont = 10
 		db.soulTrackFade = 92
@@ -16733,13 +17118,13 @@ local function Command(message)
 		db.banishWarn = 5
 		db.banishSize = 48
 		db.banishLabel = "BANISH"
-		db.banishScope = { always = true, party = false, raid = false }
+		db.banishScope = { always = true, party = false, raid = false, instance = false }
 		db.banishPoint = { "CENTER", "CENTER", 180, 210 }
 		db.fearAlert = true
 		db.fearWarn = 5
 		db.fearSize = 48
 		db.fearLabel = "FEAR"
-		db.fearScope = { always = true, party = false, raid = false }
+		db.fearScope = { always = true, party = false, raid = false, instance = false }
 		db.fearPoint = { "CENTER", "CENTER", 180, 120 }
 		db.shardShow = true
 		db.shardSize = 40
@@ -16760,7 +17145,7 @@ local function Command(message)
 		db.banishGlow = { r = 0.72, g = 0.4, b = 1 }
 		db.shardGlow = { r = 0.64, g = 0.32, b = 0.95 }
 		db.shardCount = { r = 1, g = 0.97, b = 0.86 }
-		db.shardScope = { always = true, party = false, raid = false }
+		db.shardScope = { always = true, party = false, raid = false, instance = false }
 		db.shardPoint = { "CENTER", "CENTER", -180, -80 }
 		LockRemindersWarlock.banishMoving = false
 		LockRemindersWarlock.fearMoving = false
@@ -17076,8 +17461,8 @@ local function InitDB()
 		db.soulAlert = true
 	end
 	if type(db.soulScope) == "string" or type(db.soulScope) ~= "table" then
-		local always, party, raid = ScopeFlags(db.soulScope)
-		db.soulScope = { always = always, party = party, raid = raid }
+		local always, party, raid, instance = ScopeFlags(db.soulScope)
+		db.soulScope = { always = always, party = party, raid = raid, instance = instance }
 	end
 	if type(db.soulSize) ~= "number" then
 		db.soulSize = 48
@@ -17092,8 +17477,8 @@ local function InitDB()
 		db.soulTrack = true
 	end
 	if type(db.soulTrackScope) == "string" or type(db.soulTrackScope) ~= "table" then
-		local always, party, raid = ScopeFlags(db.soulTrackScope)
-		db.soulTrackScope = { always = always, party = party, raid = raid }
+		local always, party, raid, instance = ScopeFlags(db.soulTrackScope)
+		db.soulTrackScope = { always = always, party = party, raid = raid, instance = instance }
 	end
 	if type(db.soulTrackSize) ~= "number" then
 		db.soulTrackSize = 100
@@ -17132,8 +17517,8 @@ local function InitDB()
 		db.banishLabel = "BANISH"
 	end
 	if type(db.banishScope) == "string" or type(db.banishScope) ~= "table" then
-		local always, party, raid = ScopeFlags(db.banishScope)
-		db.banishScope = { always = always, party = party, raid = raid }
+		local always, party, raid, instance = ScopeFlags(db.banishScope)
+		db.banishScope = { always = always, party = party, raid = raid, instance = instance }
 	end
 	if type(db.banishPoint) ~= "table" then
 		db.banishPoint = { "CENTER", "CENTER", 180, 210 }
@@ -17151,8 +17536,8 @@ local function InitDB()
 		db.fearLabel = "FEAR"
 	end
 	if type(db.fearScope) == "string" or type(db.fearScope) ~= "table" then
-		local always, party, raid = ScopeFlags(db.fearScope)
-		db.fearScope = { always = always, party = party, raid = raid }
+		local always, party, raid, instance = ScopeFlags(db.fearScope)
+		db.fearScope = { always = always, party = party, raid = raid, instance = instance }
 	end
 	if type(db.fearPoint) ~= "table" then
 		db.fearPoint = { "CENTER", "CENTER", 180, 120 }
@@ -17224,8 +17609,8 @@ local function InitDB()
 		db.shardCount = { r = 1, g = 0.97, b = 0.86 }
 	end
 	if type(db.shardScope) == "string" or type(db.shardScope) ~= "table" then
-		local always, party, raid = ScopeFlags(db.shardScope)
-		db.shardScope = { always = always, party = party, raid = raid }
+		local always, party, raid, instance = ScopeFlags(db.shardScope)
+		db.shardScope = { always = always, party = party, raid = raid, instance = instance }
 	end
 	if type(db.shardPoint) ~= "table" then
 		db.shardPoint = { "CENTER", "CENTER", -180, -80 }
@@ -17450,6 +17835,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
 		CreateFoodAlert()
 		CreateSpellMissAlert()
 		pcall(LockRemindersCacheMissNames)
+		pcall(LockRemindersWatchMissChat)
 		CreateCDManagerAlert()
 		LockRemindersStartCDManager()
 		CreateMiscAlerts()
@@ -17463,6 +17849,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
 		C_Timer.After(1, function()
 			pcall(WatchTalents, true)
 			pcall(LockRemindersCDPollAll)
+			pcall(LockRemindersWatchMissChat)
 		end)
 		return
 	end
