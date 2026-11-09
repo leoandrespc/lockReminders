@@ -1,8 +1,8 @@
 ## Interface: 16001, 120105
 ## Title: LockReminders
-## Notes: Reminds you about your pet, raid food, buffs, spell misses, speed, low health or mana, and soulstones.
+## Notes: Buffs, items, procs, miss/resist, CDs, warlock tools, and pet alerts.
 ## Author: leo
-## Version: 1.4.0
+## Version: 1.4.2
 ## SavedVariables: LockRemindersDB
 ## IconTexture: 136216
 
