@@ -2,7 +2,7 @@
 ## Title: LockReminders
 ## Notes: Buffs, items, procs, miss/resist, CDs, warlock tools, and pet alerts.
 ## Author: leo
-## Version: 1.4.2
+## Version: 1.4.3
 ## SavedVariables: LockRemindersDB
 ## IconTexture: 136216
 
